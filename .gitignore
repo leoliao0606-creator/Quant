@@ -6,5 +6,6 @@ __pycache__/
 artifacts/
 logs/
 logs_test/
+.venv-pi/
 
 .DS_Store

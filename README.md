@@ -50,6 +50,8 @@ This is a stronger baseline than headline-driven prompting because it gives you:
 - `backtest_model.py`: replays the saved validation/test predictions without talking to IBKR
 - `paper_trade.py`: loads the trained model and runs one cycle or a loop against the IBKR paper account
 - `ibkr_ml/`: feature engineering, training, signal generation, and IBKR execution
+- `docs/raspberry-pi.md`: Raspberry Pi 4B setup and deployment notes
+- `scripts/bootstrap_raspberry_pi.sh`: creates a Pi-friendly virtualenv and installs dependencies
 
 ## Quick start
 
@@ -111,6 +113,15 @@ python3 paper_trade.py --once --dry-run
 ```bash
 python3 paper_trade.py --once
 ```
+
+## Raspberry Pi 4B
+
+The codebase itself is portable to a Pi 4B. The practical differences are ARM package installation and the lighter CPU budget during training.
+
+- Fastest path: train on a stronger machine, copy `artifacts/gradient_boosting_model.joblib` to the Pi, and run only `paper_trade.py` there.
+- If the Pi should connect to TWS or IB Gateway on another machine, pass `--host <gateway-lan-ip>`.
+- For a Pi-first setup guide, see [docs/raspberry-pi.md](docs/raspberry-pi.md).
+- For a bootstrap script that creates `.venv-pi` and prefers system ARM packages when present, run `./scripts/bootstrap_raspberry_pi.sh`.
 
 ## Notes
 
