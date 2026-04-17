@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+
+.codex
+
+artifacts/
+logs/
+logs_test/
+
+.DS_Store
