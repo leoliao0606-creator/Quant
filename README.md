@@ -114,6 +114,75 @@ python3 paper_trade.py --once --dry-run
 python3 paper_trade.py --once
 ```
 
+7. Run continuous paper trading:
+
+The continuous mode is the same script without `--once`. By default it runs one cycle every `300` seconds and writes JSONL logs to `logs/`.
+
+First, keep it in dry-run mode until data freshness, connectivity, and model loading are stable:
+
+```bash
+python3 paper_trade.py \
+  --symbols SPY QQQ AAPL MSFT NVDA \
+  --host 127.0.0.1 \
+  --port 7497 \
+  --client-id 15 \
+  --model-path artifacts/gradient_boosting_model.joblib \
+  --risk-per-trade 0.01 \
+  --max-position-fraction 0.20 \
+  --max-active-positions 2 \
+  --max-daily-trade-count 12 \
+  --stop-loss-pct 0.008 \
+  --take-profit-pct 0.015 \
+  --max-daily-loss-pct 0.02 \
+  --interval-seconds 300 \
+  --log-dir logs \
+  --dry-run
+```
+
+When that path is stable, remove `--dry-run` to allow paper orders:
+
+```bash
+python3 paper_trade.py \
+  --symbols SPY QQQ AAPL MSFT NVDA \
+  --host 127.0.0.1 \
+  --port 7497 \
+  --client-id 15 \
+  --model-path artifacts/gradient_boosting_model.joblib \
+  --risk-per-trade 0.01 \
+  --max-position-fraction 0.20 \
+  --max-active-positions 2 \
+  --max-daily-trade-count 12 \
+  --stop-loss-pct 0.008 \
+  --take-profit-pct 0.015 \
+  --max-daily-loss-pct 0.02 \
+  --interval-seconds 300 \
+  --log-dir logs
+```
+
+If you want it to keep running after you disconnect the terminal, wrap it with `tmux`:
+
+```bash
+tmux new -s quant
+source .venv/bin/activate
+python3 paper_trade.py \
+  --symbols SPY QQQ AAPL MSFT NVDA \
+  --host 127.0.0.1 \
+  --port 7497 \
+  --client-id 15 \
+  --model-path artifacts/gradient_boosting_model.joblib \
+  --risk-per-trade 0.01 \
+  --max-position-fraction 0.20 \
+  --max-active-positions 2 \
+  --max-daily-trade-count 12 \
+  --stop-loss-pct 0.008 \
+  --take-profit-pct 0.015 \
+  --max-daily-loss-pct 0.02 \
+  --interval-seconds 300 \
+  --log-dir logs
+```
+
+Detach from the session with `Ctrl-b` then `d`. If TWS or IB Gateway runs on another machine, replace `--host 127.0.0.1` with that machine's LAN IP.
+
 ## Raspberry Pi 4B
 
 The codebase itself is portable to a Pi 4B. The practical differences are ARM package installation and the lighter CPU budget during training.

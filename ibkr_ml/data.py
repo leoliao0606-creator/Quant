@@ -26,6 +26,51 @@ def load_ib_components():
     return IB, MarketOrder, Stock, util
 
 
+def _format_ib_errors(errors: list[dict[str, Any]]) -> str:
+    seen = set()
+    formatted = []
+    for error in errors:
+        key = (
+            error.get("req_id"),
+            error.get("code"),
+            error.get("message"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+
+        req_id = error.get("req_id")
+        code = error.get("code")
+        message = error.get("message")
+        if req_id is None:
+            formatted.append(f"code {code}: {message}")
+        else:
+            formatted.append(f"reqId {req_id} code {code}: {message}")
+    return "; ".join(formatted)
+
+
+def _ib_error_handler(symbol: str, errors: list[dict[str, Any]]):
+    def on_error(*args):
+        req_id = args[0] if len(args) > 0 else None
+        code = args[1] if len(args) > 1 else None
+        message = args[2] if len(args) > 2 else ""
+        contract = args[3] if len(args) > 3 else None
+
+        contract_symbol = getattr(contract, "symbol", None)
+        if contract_symbol and contract_symbol != symbol:
+            return
+
+        errors.append(
+            {
+                "req_id": req_id,
+                "code": code,
+                "message": message,
+            }
+        )
+
+    return on_error
+
+
 def connect_ib(config: Any):
     IB, _, _, _ = load_ib_components()
     request_timeout = float(getattr(config, "request_timeout", 120.0))
@@ -137,23 +182,46 @@ def _request_historical_frame(
 ):
     _, _, _, util = load_ib_components()
 
-    bars = ib.reqHistoricalData(
-        contract,
-        endDateTime=end_datetime,
-        durationStr=duration,
-        barSizeSetting=bar_size,
-        whatToShow="TRADES",
-        useRTH=use_rth,
-        formatDate=1,
-        keepUpToDate=False,
-    )
+    ib_errors: list[dict[str, Any]] = []
+    error_handler = _ib_error_handler(symbol, ib_errors)
+    try:
+        ib.errorEvent += error_handler
+    except AttributeError:
+        error_handler = None
+
+    try:
+        bars = ib.reqHistoricalData(
+            contract,
+            endDateTime=end_datetime,
+            durationStr=duration,
+            barSizeSetting=bar_size,
+            whatToShow="TRADES",
+            useRTH=use_rth,
+            formatDate=1,
+            keepUpToDate=False,
+        )
+    finally:
+        if error_handler is not None:
+            try:
+                ib.errorEvent -= error_handler
+            except Exception:
+                pass
+
+    error_detail = _format_ib_errors(ib_errors)
     if bars is None:
+        suffix = f" IBKR API errors: {error_detail}" if error_detail else ""
         raise RuntimeError(
             f"IBKR returned no data object for {symbol}. "
             "This usually means the historical data request timed out or was rejected by TWS/Gateway."
+            f"{suffix}"
         )
 
-    return _normalize_historical_frame(util.df(bars), symbol)
+    try:
+        return _normalize_historical_frame(util.df(bars), symbol)
+    except (RuntimeError, ValueError) as exc:
+        if error_detail:
+            raise RuntimeError(f"{exc} IBKR API errors: {error_detail}") from exc
+        raise
 
 
 def _fetch_chunked_historical_frame(

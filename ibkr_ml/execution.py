@@ -151,10 +151,19 @@ class IBKRPaperTrader:
             return False, "after_close_buffer"
         return True, None
 
+    def _normalize_bar_timestamp(self, latest_bar_timestamp) -> datetime:
+        if hasattr(latest_bar_timestamp, "to_pydatetime"):
+            latest = latest_bar_timestamp.to_pydatetime()
+        else:
+            latest = latest_bar_timestamp
+
+        if latest.tzinfo is None:
+            return latest.replace(tzinfo=self.et_zone)
+        return latest.astimezone(self.et_zone)
+
     def _is_stale_bar(self, latest_bar_timestamp, now_et: datetime) -> bool:
-        now_naive = now_et.replace(tzinfo=None)
-        latest = latest_bar_timestamp.to_pydatetime()
-        age_minutes = (now_naive - latest).total_seconds() / 60.0
+        latest = self._normalize_bar_timestamp(latest_bar_timestamp)
+        age_minutes = (now_et - latest).total_seconds() / 60.0
         return age_minutes > float(self.market_config.stale_after_minutes)
 
     def _blocked_decision(
@@ -174,6 +183,14 @@ class IBKRPaperTrader:
             last_price=last_price,
             reason=reason,
         )
+
+    def _data_error_reason(self, exc: Exception) -> str:
+        message = str(exc).lower()
+        if "code 162" in message or "error 162" in message:
+            if "different ip address" in message:
+                return "data_error:IBKR_162_different_ip"
+            return "data_error:IBKR_162"
+        return f"data_error:{exc.__class__.__name__}"
 
     def _positions(self, ib):
         positions = {}
@@ -262,7 +279,9 @@ class IBKRPaperTrader:
                     max_duration_per_request=self.market_config.max_duration_per_request,
                 )
                 latest_bar_timestamp = frame["timestamp"].iloc[-1]
-                latest_bar_key = str(latest_bar_timestamp)
+                latest_bar_key = self._normalize_bar_timestamp(
+                    latest_bar_timestamp
+                ).isoformat()
                 if self._is_stale_bar(latest_bar_timestamp, now_et):
                     blocked_decisions.append(
                         self._blocked_decision(
@@ -299,7 +318,7 @@ class IBKRPaperTrader:
                     self._blocked_decision(
                         symbol=symbol,
                         position=position,
-                        reason=f"data_error:{exc.__class__.__name__}",
+                        reason=self._data_error_reason(exc),
                     )
                 )
                 self._log_event(
@@ -375,7 +394,9 @@ class IBKRPaperTrader:
                 allow_new_position=allow_new_position,
             )
             decisions.append(decision)
-            self.last_processed_bar_timestamp[snapshot.symbol] = str(snapshot.latest_bar_timestamp)
+            self.last_processed_bar_timestamp[snapshot.symbol] = self._normalize_bar_timestamp(
+                snapshot.latest_bar_timestamp
+            ).isoformat()
             if not dry_run and decision.action in {"BUY", "SELL"}:
                 self._submit_target(ib, decision)
         decisions.extend(blocked_decisions)
