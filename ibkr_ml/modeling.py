@@ -223,6 +223,7 @@ def _run_walk_forward_analysis(dataset, features, targets, model_config, risk_co
             transaction_cost_bps=model_config.transaction_cost_bps,
             max_active_positions=model_config.max_active_positions,
             risk_config=risk_config,
+            probability_ceiling=threshold_selection.get("probability_ceiling"),
         )
         fold_summaries.append(
             {
@@ -371,10 +372,16 @@ def train_model_from_frames(
         )
         model_config.entry_probability = threshold_selection["entry_probability"]
         model_config.exit_probability = threshold_selection["exit_probability"]
+        model_config.entry_percentile = threshold_selection.get("entry_percentile")
+        model_config.probability_ceiling = threshold_selection.get("probability_ceiling")
         validation_backtest = threshold_selection["validation_backtest"]
         threshold_qualified = bool(threshold_selection.get("qualified", True))
         threshold_note = str(threshold_selection.get("selection_note", ""))
     else:
+        if model_config.probability_ceiling is None:
+            model_config.probability_ceiling = float(
+                validation_predictions["probability_up"].quantile(0.999)
+            )
         validation_backtest = simulate_probability_strategy(
             prediction_rows=validation_predictions,
             entry_probability=model_config.entry_probability,
@@ -382,6 +389,7 @@ def train_model_from_frames(
             transaction_cost_bps=model_config.transaction_cost_bps,
             max_active_positions=model_config.max_active_positions,
             risk_config=risk_config,
+            probability_ceiling=model_config.probability_ceiling,
         )
         # A hand-picked threshold gets the same activity check as a searched
         # one; supplying it by hand does not make an inactive strategy valid.
@@ -417,6 +425,7 @@ def train_model_from_frames(
         transaction_cost_bps=model_config.transaction_cost_bps,
         max_active_positions=model_config.max_active_positions,
         risk_config=risk_config,
+        probability_ceiling=model_config.probability_ceiling,
     )
     walk_forward_analysis = _run_walk_forward_analysis(
         dataset, features, targets, model_config, risk_config
@@ -442,6 +451,8 @@ def train_model_from_frames(
         "thresholds": {
             "entry_probability": float(model_config.entry_probability),
             "exit_probability": float(model_config.exit_probability),
+            "entry_percentile": model_config.entry_percentile,
+            "probability_ceiling": model_config.probability_ceiling,
         },
         "validation_backtest": _strip_equity_curve(validation_backtest),
         "test_backtest": _strip_equity_curve(test_backtest),

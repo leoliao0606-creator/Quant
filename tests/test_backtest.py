@@ -244,17 +244,22 @@ class TestThresholdActivityFloor:
         selection = self.select(self.rows_with_probabilities((0.40, 0.80)))
         assert selection["qualified"] is True
         assert selection["validation_backtest"]["trade_count"] >= 20
-        assert selection["validation_backtest"]["exposure"] >= 0.05
+        assert selection["validation_backtest"]["exposure"] >= 0.005
 
-    def test_probabilities_that_never_clear_the_bar_are_not_qualified(self, capsys):
-        # Nothing reaches even the lowest candidate entry of 0.45.
-        selection = self.select(self.rows_with_probabilities((0.20, 0.42)))
+    def test_too_little_data_to_judge_is_not_qualified(self, capsys):
+        """Percentile search always finds a threshold that fires.
+
+        Under the old absolute grid a series that never reached 0.45 produced
+        no trades at all. A percentile is relative, so the only way to fail the
+        floor now is genuinely too little activity to measure.
+        """
+        selection = self.select(self.rows_with_probabilities((0.40, 0.80), n=12))
         assert selection["qualified"] is False
-        assert "no threshold reached" in selection["selection_note"]
-        assert "no threshold reached" in capsys.readouterr().out
+        assert "no percentile reached" in selection["selection_note"]
+        assert "no percentile reached" in capsys.readouterr().out
 
     def test_an_unqualified_selection_still_reports_usable_numbers(self):
-        selection = self.select(self.rows_with_probabilities((0.20, 0.42)))
+        selection = self.select(self.rows_with_probabilities((0.40, 0.80), n=12))
         # The caller needs an entry/exit pair and a backtest either way; what
         # changes is that the result says not to trust them.
         assert 0.0 < selection["entry_probability"] < 1.0
@@ -275,3 +280,83 @@ class TestThresholdActivityFloor:
         assert "exposure" in _threshold_is_usable(busy_but_flat, 20, 0.05)
         assert "trades" in _threshold_is_usable(held_but_idle, 20, 0.05)
         assert _threshold_is_usable(healthy, 20, 0.05) is None
+
+
+class TestPercentileThresholdSearch:
+    """Thresholds are searched as percentiles of the model's own distribution.
+
+    An absolute grid searches a different thing for each model, because
+    probability scales differ: a class-balanced model that prints 0.84 at its
+    most confident is not comparable with one that reaches 0.99.
+    """
+
+    def rows(self, low, high, n=400, seed=11):
+        import numpy as np
+
+        rng = np.random.default_rng(seed)
+        out = []
+        for symbol in ("AAA", "BBB"):
+            price = 100.0
+            for index in range(n):
+                price *= 1.0 + rng.normal(0.0003, 0.001)
+                out.append(
+                    {
+                        "timestamp": pd.Timestamp("2026-01-05 09:30")
+                        + pd.Timedelta(minutes=5 * index),
+                        "symbol": symbol,
+                        "close": price,
+                        "probability_up": float(rng.uniform(low, high)),
+                    }
+                )
+        return pd.DataFrame(out)
+
+    def select(self, rows, **overrides):
+        from ibkr_ml.backtest import select_probability_thresholds
+
+        kwargs = {
+            "validation_rows": rows,
+            "transaction_cost_bps": 1.0,
+            "threshold_hysteresis": 0.06,
+            "max_active_positions": 2,
+        }
+        kwargs.update(overrides)
+        return select_probability_thresholds(**kwargs)
+
+    def test_the_selection_reports_which_percentile_it_used(self):
+        selection = self.select(self.rows(0.30, 0.90))
+        assert 0.0 < selection["entry_percentile"] < 1.0
+        assert selection["probability_ceiling"] > selection["entry_probability"]
+
+    def test_the_entry_probability_is_that_percentile_of_the_data(self):
+        rows = self.rows(0.30, 0.90)
+        selection = self.select(rows)
+        expected = rows["probability_up"].quantile(selection["entry_percentile"])
+        assert selection["entry_probability"] == pytest.approx(expected)
+
+    def test_two_models_on_different_scales_get_comparable_selectivity(self):
+        """The same shape on a compressed scale must select the same fraction.
+
+        This is what an absolute grid could not do: shifting a model's output
+        into a narrower band changed which rows were selected, even though the
+        ranking - the only thing that matters - was identical.
+        """
+        wide = self.rows(0.20, 0.95)
+        narrow = wide.copy()
+        narrow["probability_up"] = 0.40 + wide["probability_up"] * 0.30
+
+        wide_selection = self.select(wide)
+        narrow_selection = self.select(narrow)
+
+        wide_share = (wide["probability_up"] >= wide_selection["entry_probability"]).mean()
+        narrow_share = (narrow["probability_up"] >= narrow_selection["entry_probability"]).mean()
+        assert wide_share == pytest.approx(narrow_share, abs=0.02)
+
+    def test_the_candidate_grid_can_be_supplied(self):
+        selection = self.select(self.rows(0.30, 0.90), candidate_percentiles=(0.50,))
+        assert selection["entry_percentile"] == 0.50
+
+    def test_the_ceiling_sits_inside_the_observed_range(self):
+        rows = self.rows(0.30, 0.90)
+        selection = self.select(rows)
+        assert selection["probability_ceiling"] <= rows["probability_up"].max()
+        assert selection["probability_ceiling"] > rows["probability_up"].median()

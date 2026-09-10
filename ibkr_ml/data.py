@@ -77,7 +77,16 @@ class IBDataError(RuntimeError):
     def is_retryable(self) -> bool:
         if self.is_session_conflict:
             return False
-        return not any(code in IB_NON_RETRYABLE_CODES for code in self.codes)
+
+        codes = self.codes
+        # IBKR reports a network blip as 1100 (connectivity lost) followed
+        # seconds later by 1102 (restored, data maintained). Seeing both means
+        # the link is already back by the time this is read, so the request is
+        # worth repeating - treating it as fatal aborted whole downloads over a
+        # hiccup that had already fixed itself.
+        if 1100 in codes and 1102 in codes:
+            return True
+        return not any(code in IB_NON_RETRYABLE_CODES for code in codes)
 
 
 def _missing_dependency(package: str) -> RuntimeError:

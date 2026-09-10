@@ -223,3 +223,45 @@ class TestCacheAge:
     def test_a_naive_timestamp_is_read_as_utc(self):
         stamp = (datetime.now(timezone.utc) - timedelta(days=2)).replace(tzinfo=None).isoformat()
         assert cache_age_days({"fetched_at": stamp}) == pytest.approx(2.0, abs=0.01)
+
+
+class TestConnectivityBlips:
+    """A network hiccup must not abort a download that can simply be repeated.
+
+    IBKR reports a blip as 1100 (connectivity lost) followed seconds later by
+    1102 (restored, data maintained). Treating 1100 alone as fatal killed a
+    60-symbol download over a hiccup that had already fixed itself.
+    """
+
+    def error(self, *codes):
+        from ibkr_ml.data import IBDataError
+
+        return IBDataError(
+            "boom", ib_errors=[{"code": c, "message": f"code {c}"} for c in codes]
+        )
+
+    def test_lost_then_restored_is_retryable(self):
+        assert self.error(1100, 1102).is_retryable is True
+
+    def test_lost_without_restore_is_not(self):
+        assert self.error(1100).is_retryable is False
+
+    def test_other_fatal_codes_are_unaffected(self):
+        assert self.error(502).is_retryable is False
+        assert self.error(504).is_retryable is False
+        assert self.error(1300).is_retryable is False
+
+    def test_an_ordinary_error_stays_retryable(self):
+        assert self.error(162).is_retryable is True
+
+    def test_a_session_conflict_stays_fatal_even_with_a_restore(self):
+        from ibkr_ml.data import IBDataError
+
+        error = IBDataError(
+            "boom",
+            ib_errors=[
+                {"code": 162, "message": "already connected from a different IP address"},
+                {"code": 1102, "message": "restored"},
+            ],
+        )
+        assert error.is_retryable is False

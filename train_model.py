@@ -127,6 +127,30 @@ def parse_args():
     # The backtests run inside training replay the live decision rules, so
     # these have to match what paper_trade.py will be launched with. A model
     # tuned against a 0.8% stop behaves differently under a 2% one.
+    parser.add_argument(
+        "--position-sizing",
+        choices=["fixed", "linear", "quadratic"],
+        default="fixed",
+        help=(
+            "How position size responds to the model's 1-10 conviction score. "
+            "fixed gives every qualifying signal the same size; linear scales "
+            "with conviction; quadratic concentrates hard on the top. Realised "
+            "return rises steeply with conviction, so a fixed size charges the "
+            "same cost on strong and weak signals alike."
+        ),
+    )
+    parser.add_argument(
+        "--minimum-holding-bars",
+        type=int,
+        default=None,
+        help="Bars a position must be held before the model may close it. Defaults to --horizon-bars.",
+    )
+    parser.add_argument(
+        "--no-entry-within-bars-of-close",
+        type=int,
+        default=None,
+        help="Do not open within this many bars of the session end. Defaults to --horizon-bars.",
+    )
     parser.add_argument("--risk-per-trade", type=float, default=0.01)
     parser.add_argument("--max-position-fraction", type=float, default=0.20)
     parser.add_argument("--max-daily-trade-count", type=int, default=12)
@@ -169,7 +193,25 @@ def main() -> None:
         max_active_positions=args.max_active_positions,
         model_path=Path(args.model_path),
     )
+    # Both default to the label's own horizon. A position closed before the
+    # horizon elapses collects a fraction of what the model predicted, and one
+    # opened just before the close is flattened before it can pay off - the two
+    # together cost 12x the annualised return in measurement.
+    minimum_holding = (
+        args.minimum_holding_bars
+        if args.minimum_holding_bars is not None
+        else args.horizon_bars
+    )
+    close_buffer = (
+        args.no_entry_within_bars_of_close
+        if args.no_entry_within_bars_of_close is not None
+        else args.horizon_bars
+    )
+
     risk_config = RiskConfig(
+        minimum_holding_bars=minimum_holding,
+        no_entry_within_bars_of_close=close_buffer,
+        position_sizing=args.position_sizing,
         risk_per_trade=args.risk_per_trade,
         max_position_fraction=args.max_position_fraction,
         max_active_positions=args.max_active_positions,

@@ -46,6 +46,7 @@ def _max_drawdown(equity_curve):
 class _SimulatedPosition:
     quantity: int = 0
     average_cost: float = 0.0
+    bars_held: int = 0
 
 
 class _PortfolioSimulator:
@@ -92,6 +93,11 @@ class _PortfolioSimulator:
         self.session_start_equity = float(starting_equity)
         self.daily_trade_count = 0
         self.trade_count = 0
+        self.convictions: list[int] = []
+        # Per-trade detail. Aggregate metrics cannot show where an edge is
+        # lost between signal and fill; only the individual fills can.
+        self.open_positions: dict[str, dict] = {}
+        self.closed_trades: list[dict] = []
         self.records: list[dict] = []
 
     def _position(self, symbol: str) -> _SimulatedPosition:
@@ -132,7 +138,7 @@ class _PortfolioSimulator:
             slots = remaining if slots is None else min(slots, remaining)
         return slots
 
-    def _execute(self, decision, price: float) -> None:
+    def _execute(self, decision, price: float, timestamp=None) -> None:
         delta = decision.target_quantity - decision.current_quantity
         if delta == 0 or price <= 0.0:
             return
@@ -148,19 +154,54 @@ class _PortfolioSimulator:
             previous_value = position.quantity * position.average_cost
             position.quantity += delta
             position.average_cost = (previous_value + delta * price) / position.quantity
+            position.bars_held = 0
+            self.open_positions[decision.symbol] = {
+                "symbol": decision.symbol,
+                "entry_time": timestamp,
+                "entry_price": price,
+                "quantity": delta,
+                "notional": notional,
+                "conviction": decision.conviction,
+                "probability_up": decision.probability_up,
+            }
         else:
+            opened = self.open_positions.pop(decision.symbol, None)
             position.quantity += delta
             if position.quantity <= 0:
                 position.quantity = 0
                 position.average_cost = 0.0
+                position.bars_held = 0
+            if opened is not None:
+                gross = price / opened["entry_price"] - 1.0
+                bars_held = None
+                if timestamp is not None and opened["entry_time"] is not None:
+                    bars_held = timestamp - opened["entry_time"]
+                self.closed_trades.append(
+                    {
+                        **opened,
+                        "exit_time": timestamp,
+                        "exit_price": price,
+                        "exit_reason": decision.reason,
+                        "gross_return": gross,
+                        # Cost is charged on both legs, expressed against the
+                        # position so it can be compared with gross_return.
+                        "net_return": gross - 2 * self.cost_rate,
+                        "pnl": opened["notional"] * gross - 2 * opened["notional"] * self.cost_rate,
+                        "holding": bars_held,
+                    }
+                )
 
         self.trade_count += 1
         self.daily_trade_count += 1
 
-    def step(self, timestamp, timestamp_rows, force_flat: bool) -> None:
+    def step(self, timestamp, timestamp_rows, force_flat: bool, bars_to_close=None) -> None:
         """Process every symbol quoted at one timestamp, in live-loop order."""
         for row in timestamp_rows.itertuples(index=False):
             self.last_price[row.symbol] = float(row.close)
+
+        for position in self.positions.values():
+            if position.quantity:
+                position.bars_held += 1
 
         self._roll_daily_state(getattr(timestamp, "date", lambda: timestamp)())
         equity = self._equity()
@@ -187,6 +228,8 @@ class _PortfolioSimulator:
                 daily_loss_limit_hit=daily_loss_limit_hit,
                 allow_new_position=False,
                 force_flat=force_flat,
+                bars_held=self._position(row.symbol).bars_held,
+                bars_to_close=bars_to_close,
             )
 
         active_after_exits = sum(
@@ -220,8 +263,12 @@ class _PortfolioSimulator:
                 daily_loss_limit_hit=daily_loss_limit_hit,
                 allow_new_position=allow_new_position,
                 force_flat=force_flat,
+                bars_held=position.bars_held,
+                bars_to_close=bars_to_close,
             )
-            self._execute(decision, float(row.close))
+            if decision.action == "BUY" and decision.conviction:
+                self.convictions.append(decision.conviction)
+            self._execute(decision, float(row.close), timestamp)
 
         closing_equity = self._equity()
         invested = closing_equity - self.cash
@@ -244,6 +291,8 @@ def _empty_result(entry_probability, exit_probability, max_active_positions):
         "exit_probability": float(exit_probability),
         "max_active_positions": max_active_positions,
         "trade_count": 0,
+        "mean_conviction": 0.0,
+        "probability_ceiling": 1.0,
         "exposure": 0.0,
         "total_return": 0.0,
         "annualized_return": 0.0,
@@ -251,6 +300,7 @@ def _empty_result(entry_probability, exit_probability, max_active_positions):
         "sharpe": 0.0,
         "max_drawdown": 0.0,
         "equity_curve": pd.DataFrame(columns=["timestamp", "portfolio_return", "equity_curve"]),
+        "trades": pd.DataFrame(),
     }
 
 
@@ -262,6 +312,7 @@ def simulate_probability_strategy(
     max_active_positions: int | None = None,
     risk_config=None,
     starting_equity: float | None = None,
+    probability_ceiling: float | None = None,
 ):
     """Replay predictions through the live decision rules and score the result.
 
@@ -286,10 +337,16 @@ def simulate_probability_strategy(
     if starting_equity is None:
         starting_equity = float(risk_config.starting_capital)
 
+    if probability_ceiling is None:
+        # The conviction scale has to top out inside the model's own range; see
+        # strategy.conviction_score.
+        probability_ceiling = float(prediction_rows["probability_up"].quantile(0.999))
+
     model_config = ModelConfig(
         entry_probability=float(entry_probability),
         exit_probability=float(exit_probability),
         transaction_cost_bps=float(transaction_cost_bps),
+        probability_ceiling=float(probability_ceiling),
     )
 
     rows = prediction_rows.copy()
@@ -311,11 +368,23 @@ def simulate_probability_strategy(
         starting_equity=starting_equity,
         max_active_positions=max_active_positions,
     )
+    # Bars remaining until the session's last bar, so the strategy can refuse
+    # to open a position it would only have to flatten minutes later.
+    unique_timestamps = sorted(rows["timestamp"].unique())
+    remaining_bars = {}
+    per_day: dict = {}
+    for stamp in unique_timestamps:
+        per_day.setdefault(pd.Timestamp(stamp).date(), []).append(stamp)
+    for stamps in per_day.values():
+        for offset, stamp in enumerate(stamps):
+            remaining_bars[stamp] = len(stamps) - 1 - offset
+
     for timestamp, timestamp_rows in rows.groupby("timestamp", sort=True):
         simulator.step(
             timestamp=timestamp,
             timestamp_rows=timestamp_rows,
             force_flat=timestamp in last_bar_per_day,
+            bars_to_close=remaining_bars.get(timestamp),
         )
 
     if not simulator.records:
@@ -341,8 +410,10 @@ def simulate_probability_strategy(
     return {
         "entry_probability": float(entry_probability),
         "exit_probability": float(exit_probability),
+        "probability_ceiling": float(probability_ceiling),
         "max_active_positions": max_active_positions,
         "trade_count": int(simulator.trade_count),
+        "mean_conviction": float(np.mean(simulator.convictions)) if simulator.convictions else 0.0,
         "exposure": float(portfolio["exposure"].mean()),
         "total_return": final_equity_ratio - 1.0,
         "annualized_return": annualized_return,
@@ -350,6 +421,7 @@ def simulate_probability_strategy(
         "sharpe": sharpe,
         "max_drawdown": _max_drawdown(portfolio["equity_curve"]),
         "equity_curve": portfolio[["timestamp", "portfolio_return", "equity_curve"]].copy(),
+        "trades": pd.DataFrame(simulator.closed_trades),
     }
 
 
@@ -361,7 +433,20 @@ def simulate_probability_strategy(
 # with 0.1% exposure, and its Sharpe of 0.53 went on to clear the deployment
 # gate.
 MINIMUM_TRADE_COUNT = 20
-MINIMUM_EXPOSURE = 0.05
+# Deliberately low. Its job is to catch a configuration that does not trade at
+# all - the case it was written for held 0.1% exposure across 54 days - not to
+# demand a heavily invested book. A selective strategy that only acts on the
+# top few percent of signals, and sizes those by conviction, is legitimately
+# invested only a small fraction of the time.
+MINIMUM_EXPOSURE = 0.005
+
+# Entry thresholds are searched as percentiles of the model's own probability
+# distribution. An absolute grid searches a different thing for each model,
+# because probability scales differ: one model's 0.60 is another's 0.72. The
+# grid reaches far into the tail because that is where the edge was measured -
+# the top 1% of signals realised 0.96% against 0.05% for a median qualifying
+# one.
+CANDIDATE_PERCENTILES = (0.60, 0.70, 0.80, 0.85, 0.90, 0.93, 0.95, 0.97, 0.98, 0.99)
 
 
 def _threshold_is_usable(result, min_trade_count: int, min_exposure: float) -> str | None:
@@ -381,6 +466,7 @@ def select_probability_thresholds(
     risk_config=None,
     min_trade_count: int = MINIMUM_TRADE_COUNT,
     min_exposure: float = MINIMUM_EXPOSURE,
+    candidate_percentiles=CANDIDATE_PERCENTILES,
 ):
     """Pick entry/exit probabilities on the validation split.
 
@@ -390,34 +476,42 @@ def select_probability_thresholds(
     threshold producing real activity is a finding in itself, and it should not
     be hidden behind a fallback that looks like a normal selection.
     """
-    np = _load_numpy()
+    probabilities = validation_rows["probability_up"]
+    # Where the conviction scale tops out, taken from the model's own range.
+    probability_ceiling = float(probabilities.quantile(0.999))
 
-    candidate_entries = np.arange(0.45, 0.71, 0.02)
     best_choice = None
     rejections: list[str] = []
 
-    for entry_probability in candidate_entries:
+    for percentile in candidate_percentiles:
+        entry_probability = float(probabilities.quantile(percentile))
         exit_probability = max(entry_probability - threshold_hysteresis, 0.05)
         result = simulate_probability_strategy(
             prediction_rows=validation_rows,
-            entry_probability=float(entry_probability),
-            exit_probability=float(exit_probability),
+            entry_probability=entry_probability,
+            exit_probability=exit_probability,
             transaction_cost_bps=transaction_cost_bps,
             max_active_positions=max_active_positions,
             risk_config=risk_config,
+            probability_ceiling=probability_ceiling,
         )
 
         rejection = _threshold_is_usable(result, min_trade_count, min_exposure)
         if rejection is not None:
-            rejections.append(f"{float(entry_probability):.2f}: {rejection}")
+            rejections.append(f"top {(1 - percentile) * 100:.0f}%: {rejection}")
             continue
 
-        score = (result["sharpe"], result["total_return"], -abs(result["exposure"] - 0.35))
+        # Ranked on Sharpe then total return. The old third key nudged the
+        # search towards 35% exposure, which is the opposite of what the
+        # evidence supports: selectivity is where the edge lives.
+        score = (result["sharpe"], result["total_return"])
         if best_choice is None or score > best_choice["score"]:
             best_choice = {
                 "score": score,
-                "entry_probability": float(entry_probability),
-                "exit_probability": float(exit_probability),
+                "entry_probability": entry_probability,
+                "exit_probability": exit_probability,
+                "entry_percentile": float(percentile),
+                "probability_ceiling": probability_ceiling,
                 "validation_backtest": result,
                 "qualified": True,
                 "selection_note": "",
@@ -429,7 +523,8 @@ def select_probability_thresholds(
     # Nothing traded enough to be judged. Fall back to the most active
     # threshold rather than a fixed one, so the reported numbers describe the
     # closest thing to a real strategy this model can produce.
-    fallback_entry = float(candidate_entries[0])
+    fallback_percentile = float(candidate_percentiles[0])
+    fallback_entry = float(probabilities.quantile(fallback_percentile))
     fallback_exit = max(fallback_entry - threshold_hysteresis, 0.05)
     result = simulate_probability_strategy(
         prediction_rows=validation_rows,
@@ -438,17 +533,20 @@ def select_probability_thresholds(
         transaction_cost_bps=transaction_cost_bps,
         max_active_positions=max_active_positions,
         risk_config=risk_config,
+        probability_ceiling=probability_ceiling,
     )
     note = (
-        f"no threshold reached {min_trade_count} trades and {min_exposure:.0%} exposure; "
-        f"reporting the most active candidate ({fallback_entry:.2f}). "
+        f"no percentile reached {min_trade_count} trades and {min_exposure:.1%} exposure; "
+        f"reporting the most active candidate (top {(1 - fallback_percentile) * 100:.0f}%). "
         + "; ".join(rejections[:3])
     )
     print(f"warning: {note}")
     return {
-        "score": (result["sharpe"], result["total_return"], -abs(result["exposure"] - 0.35)),
+        "score": (result["sharpe"], result["total_return"]),
         "entry_probability": fallback_entry,
         "exit_probability": fallback_exit,
+        "entry_percentile": fallback_percentile,
+        "probability_ceiling": probability_ceiling,
         "validation_backtest": result,
         "qualified": False,
         "selection_note": note,

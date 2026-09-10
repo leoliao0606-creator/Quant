@@ -55,6 +55,16 @@ class ModelConfig:
     walk_forward_splits: int = 3
     entry_probability: float | None = None
     exit_probability: float | None = None
+    # Search the entry threshold as a percentile of the model's own probability
+    # distribution rather than as an absolute number. Probability scales differ
+    # between models - one model's 0.60 is another's 0.72 - so a fixed grid of
+    # absolute values searches a different thing for each of them. Selecting
+    # "the top 5% of signals" means the same for all.
+    entry_percentile: float | None = None
+    # Upper end of the conviction scale, taken from the model's own observed
+    # probability range at training time. Left at None it falls back to 1.0,
+    # which compresses every real signal into the lower half of the scale.
+    probability_ceiling: float | None = None
     threshold_hysteresis: float = 0.06
     # One-way cost in basis points (1 bps = 0.01%), charged on every position
     # change. The old default of 1.0 covered roughly the quoted spread and
@@ -76,6 +86,25 @@ class RiskConfig:
     # max_position_fraction * stop_loss_pct (0.20 * 0.008 = 0.0016 by default).
     # Above that the notional cap always wins and every position is simply
     # max_position_fraction of equity, whatever this value says.
+    # How position size responds to the model's conviction.
+    #   fixed     - every qualifying signal gets max_position_fraction
+    #   linear    - size scales with the 1-10 conviction score
+    #   quadratic - size scales with its square, concentrating hard on the top
+    # This matters because conviction is strongly related to realised return:
+    # measured on held-out data, the top 1% of signals returned 0.96% while a
+    # median qualifying signal returned 0.05%. Sizing them alike pays the same
+    # cost on both, so the weak trades consume what the strong ones earn.
+    position_sizing: str = "fixed"
+    # Hold at least this many bars before the model is allowed to close a
+    # position. The label measures the return over horizon_bars; letting a
+    # noisy probability close after two bars collects a fraction of what the
+    # model predicted. Measured: positions held 6.9 bars against a 12-bar
+    # horizon, and only 13% reached it.
+    minimum_holding_bars: int = 0
+    # Do not open a position this close to the end-of-session flatten. A signal
+    # opened just before the close is flattened before it can pay off: 44% of
+    # trades exited that way, averaging 0.04%.
+    no_entry_within_bars_of_close: int = 0
     risk_per_trade: float = 0.01
     max_position_fraction: float = 0.20
     max_active_positions: int | None = None

@@ -88,6 +88,13 @@ class IBKRPaperTrader:
             model_config.entry_probability = thresholds.get("entry_probability", 0.58)
         if model_config.exit_probability is None:
             model_config.exit_probability = thresholds.get("exit_probability", 0.48)
+        # The conviction scale has to match the one the model was sized against;
+        # falling back to 1.0 would compress every live signal into the bottom
+        # half of the scale and undersize every position.
+        if getattr(model_config, "probability_ceiling", None) is None:
+            model_config.probability_ceiling = thresholds.get("probability_ceiling")
+        if getattr(model_config, "entry_percentile", None) is None:
+            model_config.entry_percentile = thresholds.get("entry_percentile")
         if getattr(risk_config, "max_active_positions", None) is None:
             risk_config.max_active_positions = trained_model_config.get("max_active_positions", 2)
         self.model_config = model_config
@@ -978,6 +985,8 @@ class IBKRPaperTrader:
             print(
                 f"{decision.symbol}: action={decision.action} "
                 f"prob_up={decision.probability_up:.3f} "
+                f"conviction={decision.conviction}/10 "
+                f"size={decision.position_scale:.0%} "
                 f"qty={decision.current_quantity}->{decision.target_quantity} "
                 f"price={decision.last_price:.2f} "
                 f"reason={decision.reason}"
