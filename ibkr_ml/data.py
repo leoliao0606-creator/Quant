@@ -1,7 +1,83 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, NamedTuple
+
+
+# IBKR pushes purely informational status notices through the same errorEvent
+# as real errors: 2104 "Market data farm connection is OK", 2106 "HMDS data
+# farm connection is OK", 2158 "Sec-def data farm connection is OK". They carry
+# no contract, so a symbol filter alone lets them through.
+IB_INFORMATIONAL_CODE_RANGE = (2100, 2200)
+
+# Failures where retrying with a smaller chunk cannot help, because the problem
+# is the connection or the session rather than the size of the request.
+IB_NON_RETRYABLE_CODES = frozenset({326, 502, 504, 1100, 1300})
+
+
+def _is_informational_code(code: Any) -> bool:
+    try:
+        numeric = int(code)
+    except (TypeError, ValueError):
+        return False
+    low, high = IB_INFORMATIONAL_CODE_RANGE
+    return low <= numeric < high
+
+
+class IBDataError(RuntimeError):
+    """A historical data failure that keeps IBKR's structured error codes.
+
+    ``codes`` lets callers branch on the actual IBKR error code instead of
+    pattern matching a human readable message, and ``original_type`` preserves
+    the class name of the wrapped exception so a caller's reason string stays
+    stable whether or not any IBKR message happened to arrive.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        ib_errors: Any = (),
+        original_type: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.ib_errors = [dict(error) for error in ib_errors]
+        self.original_type = original_type or "RuntimeError"
+
+    @property
+    def codes(self) -> list[int]:
+        numeric_codes = []
+        for error in self.ib_errors:
+            try:
+                numeric_codes.append(int(error.get("code")))
+            except (TypeError, ValueError):
+                continue
+        return numeric_codes
+
+    @property
+    def ib_messages(self) -> list[str]:
+        return [str(error.get("message", "")) for error in self.ib_errors]
+
+    @property
+    def is_session_conflict(self) -> bool:
+        """True for IBKR 162 raised because another IP holds the TWS session.
+
+        Code 162 covers both a benign "HMDS query returned no data" answer and
+        a session already connected elsewhere; only the latter is hopeless.
+        """
+        for error in self.ib_errors:
+            try:
+                code = int(error.get("code"))
+            except (TypeError, ValueError):
+                continue
+            if code == 162 and "different ip address" in str(error.get("message", "")).lower():
+                return True
+        return False
+
+    @property
+    def is_retryable(self) -> bool:
+        if self.is_session_conflict:
+            return False
+        return not any(code in IB_NON_RETRYABLE_CODES for code in self.codes)
 
 
 def _missing_dependency(package: str) -> RuntimeError:
@@ -18,12 +94,63 @@ def _load_pandas():
     return pd
 
 
-def load_ib_components():
+class IBComponents(NamedTuple):
+    """The ib_insync names this project uses, imported lazily.
+
+    A named tuple rather than a bare tuple: every caller used to unpack by
+    position, so adding an order type meant editing each unpack site, and a
+    mis-ordered unpack bound the wrong class silently instead of failing.
+    """
+
+    IB: Any
+    MarketOrder: Any
+    LimitOrder: Any
+    StopOrder: Any
+    Stock: Any
+    util: Any
+
+
+def load_ib_components() -> IBComponents:
     try:
-        from ib_insync import IB, MarketOrder, Stock, util
+        from ib_insync import IB, LimitOrder, MarketOrder, Stock, StopOrder, util
     except ModuleNotFoundError as exc:
         raise _missing_dependency("ib-insync") from exc
-    return IB, MarketOrder, Stock, util
+    return IBComponents(
+        IB=IB,
+        MarketOrder=MarketOrder,
+        LimitOrder=LimitOrder,
+        StopOrder=StopOrder,
+        Stock=Stock,
+        util=util,
+    )
+
+
+# Statuses that mean IBKR has the order and is working it. Anything in
+# IB_HELD_IN_TWS_STATES is still sitting inside TWS and has not reached IBKR:
+# most often because TWS is holding it behind the order precautions dialog,
+# waiting for a human to click through it. Such an order disappears when the
+# API client disconnects, so treating it as submitted makes the log claim a
+# trade that never happened.
+IB_ACKNOWLEDGED_STATES = frozenset({"PreSubmitted", "Submitted", "Filled"})
+IB_HELD_IN_TWS_STATES = frozenset({"PendingSubmit", "ApiPending"})
+
+
+def load_order_status_states() -> frozenset[str]:
+    """Order statuses that mean the order is still working at IBKR.
+
+    Read from ib_insync so the set cannot drift from the library's own
+    definition, with a literal fallback for the case where the attribute is
+    missing or renamed.
+    """
+    try:
+        from ib_insync import OrderStatus
+    except ModuleNotFoundError as exc:
+        raise _missing_dependency("ib-insync") from exc
+
+    active_states = getattr(OrderStatus, "ActiveStates", None)
+    if not active_states:
+        return frozenset({"ApiPending", "PendingSubmit", "PreSubmitted", "Submitted"})
+    return frozenset(str(state) for state in active_states)
 
 
 def _format_ib_errors(errors: list[dict[str, Any]]) -> str:
@@ -56,6 +183,12 @@ def _ib_error_handler(symbol: str, errors: list[dict[str, Any]]):
         message = args[2] if len(args) > 2 else ""
         contract = args[3] if len(args) > 3 else None
 
+        # Status notices are not failures. Collecting them would attach
+        # unrelated text to every error message and would flip the exception
+        # type in _request_historical_frame.
+        if _is_informational_code(code):
+            return
+
         contract_symbol = getattr(contract, "symbol", None)
         if contract_symbol and contract_symbol != symbol:
             return
@@ -71,8 +204,57 @@ def _ib_error_handler(symbol: str, errors: list[dict[str, Any]]):
     return on_error
 
 
+def _attach_ib_error_listener(ib: Any, handler: Any) -> bool:
+    """Attach handler to ib.errorEvent and report whether it really attached.
+
+    Prefers eventkit's explicit connect(). The ``+=`` form expands to
+    ``ib.errorEvent = ib.errorEvent.__iadd__(handler)``, which connects the
+    listener *before* the attribute assignment; if that assignment raises, the
+    listener is already live while the caller believes it never attached, and
+    it then never gets removed.
+    """
+    event = getattr(ib, "errorEvent", None)
+    if event is None:
+        return False
+
+    connect = getattr(event, "connect", None)
+    if callable(connect):
+        connect(handler)
+        return True
+
+    try:
+        ib.errorEvent += handler
+    except AttributeError:
+        return False
+    return True
+
+
+def _detach_ib_error_listener(ib: Any, handler: Any, symbol: str) -> None:
+    """Remove handler from ib.errorEvent, reporting failures instead of hiding them.
+
+    A listener left attached to a long lived connection keeps appending to a
+    list nobody reads any more, on every later IBKR message, so a failure here
+    must be visible.
+    """
+    event = getattr(ib, "errorEvent", None)
+    if event is None:
+        return
+
+    disconnect = getattr(event, "disconnect", None)
+    try:
+        if callable(disconnect):
+            disconnect(handler)
+        else:
+            ib.errorEvent -= handler
+    except Exception as exc:
+        print(
+            f"warning: failed to detach the IBKR error listener for {symbol}: "
+            f"{exc.__class__.__name__}: {exc}"
+        )
+
+
 def connect_ib(config: Any):
-    IB, _, _, _ = load_ib_components()
+    IB = load_ib_components().IB
     request_timeout = float(getattr(config, "request_timeout", 120.0))
     connect_retries = max(int(getattr(config, "connect_retries", 1)), 1)
     retry_delay_seconds = float(getattr(config, "retry_delay_seconds", 3.0))
@@ -165,7 +347,12 @@ def _normalize_historical_frame(raw_frame, symbol: str):
         raise ValueError(f"No historical bars returned for symbol {symbol}.")
 
     frame = raw_frame.rename(columns={"date": "timestamp"})
-    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=False)
+    try:
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=False)
+    except (ValueError, TypeError):
+        # A range spanning a daylight-saving change arrives with two different
+        # UTC offsets, which has no single naive dtype. UTC does.
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
     columns = ["timestamp", "open", "high", "low", "close", "volume"]
     frame = frame[columns].sort_values("timestamp").reset_index(drop=True)
     return frame
@@ -180,14 +367,11 @@ def _request_historical_frame(
     use_rth: bool,
     end_datetime: Any,
 ):
-    _, _, _, util = load_ib_components()
+    util = load_ib_components().util
 
     ib_errors: list[dict[str, Any]] = []
     error_handler = _ib_error_handler(symbol, ib_errors)
-    try:
-        ib.errorEvent += error_handler
-    except AttributeError:
-        error_handler = None
+    attached = _attach_ib_error_listener(ib, error_handler)
 
     try:
         bars = ib.reqHistoricalData(
@@ -201,27 +385,31 @@ def _request_historical_frame(
             keepUpToDate=False,
         )
     finally:
-        if error_handler is not None:
-            try:
-                ib.errorEvent -= error_handler
-            except Exception:
-                pass
+        if attached:
+            _detach_ib_error_listener(ib, error_handler, symbol)
 
     error_detail = _format_ib_errors(ib_errors)
+    suffix = f" IBKR API errors: {error_detail}" if error_detail else ""
     if bars is None:
-        suffix = f" IBKR API errors: {error_detail}" if error_detail else ""
-        raise RuntimeError(
+        raise IBDataError(
             f"IBKR returned no data object for {symbol}. "
             "This usually means the historical data request timed out or was rejected by TWS/Gateway."
-            f"{suffix}"
+            f"{suffix}",
+            ib_errors=ib_errors,
+            original_type="RuntimeError",
         )
 
     try:
         return _normalize_historical_frame(util.df(bars), symbol)
     except (RuntimeError, ValueError) as exc:
-        if error_detail:
-            raise RuntimeError(f"{exc} IBKR API errors: {error_detail}") from exc
-        raise
+        # Wrap unconditionally and keep the original class name. Wrapping only
+        # when an IBKR message arrived made the exception type - and therefore
+        # the caller's reason string - depend on unrelated API chatter.
+        raise IBDataError(
+            f"{exc}{suffix}",
+            ib_errors=ib_errors,
+            original_type=exc.__class__.__name__,
+        ) from exc
 
 
 def _fetch_chunked_historical_frame(
@@ -254,6 +442,7 @@ def _fetch_chunked_historical_frame(
     next_end = ""
     previous_earliest = None
     minimum_chunk_days = 7 if _is_intraday_bar_size(bar_size) else 30
+    chunk_failures: list[str] = []
 
     while remaining_days > 0:
         current_chunk_days = min(chunk_days, remaining_days)
@@ -267,9 +456,24 @@ def _fetch_chunked_historical_frame(
                 use_rth=use_rth,
                 end_datetime=next_end,
             )
-        except Exception:
-            if current_chunk_days <= minimum_chunk_days:
+        except Exception as exc:
+            # Keep every attempt's diagnostics. Discarding them lost the IBKR
+            # error codes that explain why the download failed.
+            failure = f"{current_chunk_days} D chunk: {exc.__class__.__name__}: {exc}"
+            chunk_failures.append(failure)
+            print(f"warning: historical data for {symbol} failed, {failure}")
+
+            if not getattr(exc, "is_retryable", True):
+                # A session conflict or a lost connection fails identically at
+                # every chunk size, so halving only burns round trips.
                 raise
+            if current_chunk_days <= minimum_chunk_days:
+                raise IBDataError(
+                    f"Historical data for {symbol} failed at the minimum chunk size "
+                    f"of {minimum_chunk_days} D. Attempts: " + " | ".join(chunk_failures),
+                    ib_errors=getattr(exc, "ib_errors", ()),
+                    original_type=getattr(exc, "original_type", exc.__class__.__name__),
+                ) from exc
             chunk_days = max(current_chunk_days // 2, minimum_chunk_days)
             continue
 
@@ -284,7 +488,11 @@ def _fetch_chunked_historical_frame(
         ib.sleep(0.2)
 
     if not frames:
-        raise RuntimeError(f"No historical chunks were returned for {symbol}.")
+        detail = " Attempts: " + " | ".join(chunk_failures) if chunk_failures else ""
+        raise IBDataError(
+            f"No historical chunks were returned for {symbol}.{detail}",
+            original_type="RuntimeError",
+        )
 
     combined = pd.concat(frames, ignore_index=True)
     combined = combined.sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True)
@@ -299,7 +507,7 @@ def fetch_historical_frame(
     use_rth: bool,
     max_duration_per_request: str | None = None,
 ):
-    _, _, Stock, _ = load_ib_components()
+    Stock = load_ib_components().Stock
 
     contract = Stock(symbol, "SMART", "USD")
     ib.qualifyContracts(contract)

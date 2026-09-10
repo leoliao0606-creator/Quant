@@ -19,6 +19,25 @@ def parse_args():
     parser.add_argument("--duration", default="5 D")
     parser.add_argument("--bar-size", default="5 mins")
     parser.add_argument("--stale-after-minutes", type=int, default=15)
+    parser.add_argument(
+        "--bar-timezone",
+        default=None,
+        help=(
+            "IANA timezone of the bar timestamps TWS returns, e.g. UTC or "
+            "America/Los_Angeles. Set this when TWS/IB Gateway runs on a "
+            "machine that is not on US Eastern time; leaving it unset treats "
+            "the timestamps as US Eastern."
+        ),
+    )
+    parser.add_argument(
+        "--future-bar-tolerance-minutes",
+        type=float,
+        default=1.0,
+        help=(
+            "A bar timestamp more than this many minutes in the future is "
+            "reported as a data fault instead of being accepted as fresh."
+        ),
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7497)
     parser.add_argument("--client-id", type=int, default=15)
@@ -37,6 +56,33 @@ def parse_args():
     parser.add_argument("--take-profit-pct", type=float, default=0.015)
     parser.add_argument("--max-daily-loss-pct", type=float, default=0.02)
     parser.add_argument("--allow-unsafe-model", action="store_true")
+    parser.add_argument(
+        "--no-bracket-orders",
+        dest="use_bracket_orders",
+        action="store_false",
+        help=(
+            "Send plain market entries instead of a bracket. Without a bracket "
+            "the stop loss and take profit exist only inside this process, so "
+            "they stop protecting the position the moment the loop dies."
+        ),
+    )
+    parser.set_defaults(use_bracket_orders=True)
+    parser.add_argument(
+        "--flatten-time",
+        default="15:45",
+        help=(
+            "US Eastern HH:MM after which the loop only closes positions. "
+            "The model predicts three five-minute bars ahead, so a position "
+            "held overnight is far outside the horizon it was trained on."
+        ),
+    )
+    parser.add_argument(
+        "--no-flatten-before-close",
+        dest="flatten_before_close",
+        action="store_false",
+        help="Keep positions overnight instead of closing them before the session ends.",
+    )
+    parser.set_defaults(flatten_before_close=True)
     parser.add_argument("--log-dir", default="logs")
     parser.add_argument("--interval-seconds", type=int, default=300)
     parser.add_argument("--once", action="store_true")
@@ -60,6 +106,8 @@ def main() -> None:
         duration=args.duration,
         bar_size=args.bar_size,
         stale_after_minutes=args.stale_after_minutes,
+        bar_timezone=args.bar_timezone,
+        future_bar_tolerance_minutes=args.future_bar_tolerance_minutes,
     )
     model_config = ModelConfig(
         entry_probability=args.entry_probability,
@@ -75,6 +123,9 @@ def main() -> None:
         take_profit_pct=args.take_profit_pct,
         max_daily_loss_pct=args.max_daily_loss_pct,
         allow_unsafe_model=args.allow_unsafe_model,
+        use_bracket_orders=args.use_bracket_orders,
+        flatten_before_close=args.flatten_before_close,
+        flatten_time_et=args.flatten_time,
         log_dir=Path(args.log_dir),
     )
 

@@ -5,7 +5,12 @@ from pathlib import Path
 from typing import Mapping
 
 from .backtest import select_probability_thresholds, simulate_probability_strategy
-from .features import FEATURE_COLUMNS, build_labeled_rows, build_latest_feature_row
+from .config import RiskConfig
+from .features import (
+    build_labeled_rows,
+    build_latest_feature_row,
+    feature_columns,
+)
 
 
 def _load_joblib():
@@ -58,14 +63,19 @@ def _load_sklearn():
     )
 
 
-def _encode_features(rows):
+def _encode_features(rows, columns):
+    """One-hot the symbol and keep the given feature columns, in that order.
+
+    The column list is passed in rather than read from a module constant
+    because it now depends on which reference series were supplied: a model
+    trained with cross-asset features has a wider matrix than one without.
+    """
     pd = _load_pandas()
-    matrix = pd.get_dummies(
-        rows[["symbol", *FEATURE_COLUMNS]],
+    return pd.get_dummies(
+        rows[["symbol", *columns]],
         columns=["symbol"],
         dtype=float,
     )
-    return matrix
 
 
 def _build_metrics(y_true, probabilities, decision_threshold: float):
@@ -159,7 +169,7 @@ def _walk_forward_windows(row_count: int, validation_split: float, walk_forward_
     return windows
 
 
-def _run_walk_forward_analysis(dataset, features, targets, model_config):
+def _run_walk_forward_analysis(dataset, features, targets, model_config, risk_config):
     np = _load_numpy()
 
     fold_summaries = []
@@ -189,6 +199,7 @@ def _run_walk_forward_analysis(dataset, features, targets, model_config):
             transaction_cost_bps=model_config.transaction_cost_bps,
             threshold_hysteresis=model_config.threshold_hysteresis,
             max_active_positions=model_config.max_active_positions,
+            risk_config=risk_config,
         )
 
         test_probabilities = model.predict_proba(x_test)[:, 1]
@@ -207,6 +218,7 @@ def _run_walk_forward_analysis(dataset, features, targets, model_config):
             exit_probability=threshold_selection["exit_probability"],
             transaction_cost_bps=model_config.transaction_cost_bps,
             max_active_positions=model_config.max_active_positions,
+            risk_config=risk_config,
         )
         fold_summaries.append(
             {
@@ -258,9 +270,37 @@ def _run_walk_forward_analysis(dataset, features, targets, model_config):
     }
 
 
-def train_model_from_frames(frames: Mapping[str, object], model_config):
+def train_model_from_frames(
+    frames: Mapping[str, object],
+    model_config,
+    risk_config=None,
+    bar_timezone: str | None = None,
+    reference_frames=None,
+    reference_symbols=None,
+):
+    """Train, evaluate and persist the model bundle.
+
+    risk_config is the one the paper trader will run with. Every backtest in
+    here replays the live decision rules, so stop loss, take profit, the daily
+    loss limit and the daily trade cap all shape the metrics that the
+    deployment gate later reads. Leaving it at None uses RiskConfig defaults,
+    which then have to match whatever paper_trade.py is launched with.
+
+    bar_timezone is the timezone of the machine that produced these bars. It is
+    stored in the bundle so the paper trader can check that it is scoring bars
+    read on the same clock the model was fitted on.
+
+    reference_frames optionally supplies series to measure each symbol against
+    ("mkt", "sector", "volx"), and reference_symbols names them. The names are
+    recorded in the bundle so the paper trader knows which extra series it has
+    to fetch before it can score anything - scoring without them would leave
+    the cross-asset columns missing.
+    """
     pd = _load_pandas()
     joblib = _load_joblib()
+
+    if risk_config is None:
+        risk_config = RiskConfig()
 
     training_rows = []
     for symbol, frame in frames.items():
@@ -269,6 +309,12 @@ def train_model_from_frames(frames: Mapping[str, object], model_config):
             price_frame=frame,
             horizon_bars=model_config.horizon_bars,
             positive_return_threshold=model_config.positive_return_threshold,
+            bar_timezone=bar_timezone,
+            reference_frames=reference_frames,
+            label_mode=getattr(model_config, "label_mode", "absolute"),
+            volatility_threshold_multiple=getattr(
+                model_config, "volatility_threshold_multiple", 0.5
+            ),
         )
         training_rows.append(rows)
 
@@ -280,7 +326,8 @@ def train_model_from_frames(frames: Mapping[str, object], model_config):
     if len(dataset) < 100:
         raise ValueError("Dataset is too small. Increase duration or number of symbols.")
 
-    features = _encode_features(dataset)
+    active_feature_columns = feature_columns(reference_frames)
+    features = _encode_features(dataset, active_feature_columns)
     targets = dataset["target"].astype(int)
 
     train_end, validation_end = _split_indices(
@@ -312,6 +359,7 @@ def train_model_from_frames(frames: Mapping[str, object], model_config):
             transaction_cost_bps=model_config.transaction_cost_bps,
             threshold_hysteresis=model_config.threshold_hysteresis,
             max_active_positions=model_config.max_active_positions,
+            risk_config=risk_config,
         )
         model_config.entry_probability = threshold_selection["entry_probability"]
         model_config.exit_probability = threshold_selection["exit_probability"]
@@ -323,6 +371,7 @@ def train_model_from_frames(frames: Mapping[str, object], model_config):
             exit_probability=model_config.exit_probability,
             transaction_cost_bps=model_config.transaction_cost_bps,
             max_active_positions=model_config.max_active_positions,
+            risk_config=risk_config,
         )
 
     test_predictions = _prediction_rows(
@@ -350,8 +399,11 @@ def train_model_from_frames(frames: Mapping[str, object], model_config):
         exit_probability=float(model_config.exit_probability),
         transaction_cost_bps=model_config.transaction_cost_bps,
         max_active_positions=model_config.max_active_positions,
+        risk_config=risk_config,
     )
-    walk_forward_analysis = _run_walk_forward_analysis(dataset, features, targets, model_config)
+    walk_forward_analysis = _run_walk_forward_analysis(
+        dataset, features, targets, model_config, risk_config
+    )
 
     model_path = Path(model_config.model_path)
     model_path.parent.mkdir(parents=True, exist_ok=True)
@@ -359,6 +411,11 @@ def train_model_from_frames(frames: Mapping[str, object], model_config):
         "model": model,
         "feature_columns": list(x_train.columns),
         "model_config": asdict(model_config),
+        "risk_config": asdict(risk_config),
+        "bar_timezone": bar_timezone,
+        "library_versions": _library_versions(),
+        "reference_symbols": dict(reference_symbols or {}),
+        "base_feature_columns": list(active_feature_columns),
         "metrics": test_metrics,
         "validation_metrics": validation_metrics,
         "test_metrics": test_metrics,
@@ -379,14 +436,104 @@ def train_model_from_frames(frames: Mapping[str, object], model_config):
     return bundle
 
 
+def _library_versions() -> dict[str, str]:
+    """Versions of the libraries whose objects end up inside the bundle."""
+    versions = {}
+    for module_name, key in (
+        ("sklearn", "scikit-learn"),
+        ("numpy", "numpy"),
+        ("pandas", "pandas"),
+        ("joblib", "joblib"),
+    ):
+        try:
+            module = __import__(module_name)
+        except ModuleNotFoundError:
+            continue
+        versions[key] = str(getattr(module, "__version__", "unknown"))
+    return versions
+
+
+def _warn_on_library_drift(bundle) -> None:
+    """Report libraries that changed version since the bundle was trained.
+
+    A bundle is a pickle of scikit-learn objects. A different scikit-learn can
+    load it and give different predictions, or refuse to load it at all - which
+    is what happened to the model trained in April, whose load fails with
+    "No module named '_loss'" after a scikit-learn upgrade. Recording the
+    versions turns that into something diagnosable.
+    """
+    trained_versions = bundle.get("library_versions")
+    if not trained_versions:
+        return
+
+    current_versions = _library_versions()
+    drifted = [
+        f"{name}: trained on {version}, running {current_versions.get(name, 'missing')}"
+        for name, version in trained_versions.items()
+        if current_versions.get(name) != version
+    ]
+    if drifted:
+        print(
+            "warning: the model bundle was trained under different library "
+            "versions (" + "; ".join(drifted) + "). Predictions may differ from "
+            "the ones the deployment gate was computed on; retraining on this "
+            "machine removes the doubt."
+        )
+
+
 def load_model_bundle(model_path):
     joblib = _load_joblib()
-    return joblib.load(model_path)
+    try:
+        bundle = joblib.load(model_path)
+    except Exception as exc:
+        current = _library_versions()
+        raise RuntimeError(
+            f"Could not load the model bundle at {model_path}: "
+            f"{exc.__class__.__name__}: {exc}. "
+            "A bundle is a pickle of scikit-learn objects, so it only loads "
+            "under a compatible scikit-learn. This machine has scikit-learn "
+            f"{current.get('scikit-learn', 'not installed')} and numpy "
+            f"{current.get('numpy', 'not installed')}. Retrain with "
+            "train_model.py on this machine, or install the versions the "
+            "bundle was trained under."
+        ) from exc
+
+    _warn_on_library_drift(bundle)
+    return bundle
 
 
-def predict_probability(bundle, symbol: str, price_frame):
-    latest = build_latest_feature_row(symbol, price_frame)
-    features = _encode_features(latest)
+def predict_probability(
+    bundle,
+    symbol: str,
+    price_frame,
+    bar_timezone: str | None = None,
+    reference_frames=None,
+    reference_symbols=None,
+):
+    """Score the newest usable bar for one symbol.
+
+    bar_timezone must describe the bars being passed in. Features are converted
+    to US Eastern before scoring, so a model trained on a US Eastern host stays
+    valid on a UTC one as long as each side declares its own zone.
+
+    reference_frames must supply the same kinds of reference series the model
+    was trained with; the bundle records which. Scoring without them leaves the
+    cross-asset columns missing, and reindex would quietly fill them with
+    zeroes - a value that means something quite different from "unknown".
+    """
+    expected = bundle.get("base_feature_columns")
+    latest = build_latest_feature_row(symbol, price_frame, bar_timezone, reference_frames)
+
+    columns = expected if expected else feature_columns(reference_frames)
+    missing = [column for column in columns if column not in latest.columns]
+    if missing:
+        raise ValueError(
+            f"Cannot score {symbol}: the model expects features {missing} that were not "
+            "built. Supply the reference series the model was trained with "
+            f"(bundle records: {bundle.get('reference_symbols')})."
+        )
+
+    features = _encode_features(latest, columns)
     features = features.reindex(columns=bundle["feature_columns"], fill_value=0.0)
 
     probability_up = float(bundle["model"].predict_proba(features)[0, 1])

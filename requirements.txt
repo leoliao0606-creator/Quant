@@ -1,5 +1,20 @@
-numpy
-pandas
-scikit-learn
-joblib
-ib-insync
+# Pinned to the versions in the local `ibkr_trade` conda environment
+# (Python 3.10), which is what this project actually runs under.
+#
+# A trained model is a joblib pickle of scikit-learn objects: it only loads
+# under a compatible scikit-learn, and a mismatch can fail outright. The
+# bundle in artifacts/ loads under scikit-learn 1.7.x and fails under 1.9
+# with "No module named '_loss'". That is what these pins exist to prevent.
+# Bump the pins and retrain in the same change, never one without the other.
+#
+# On a Raspberry Pi, scripts/bootstrap_raspberry_pi.sh prefers the system ARM
+# packages from apt and ignores these pins. That is deliberate - building the
+# numeric stack from source there takes hours - but it means a model trained
+# on the desktop may not match the Pi's versions. train_model.py records the
+# versions it used in the bundle and load_model_bundle reports any drift.
+numpy==2.2.6
+pandas==2.3.3
+scikit-learn==1.7.2
+scipy==1.15.3
+joblib==1.5.3
+ib-insync==0.9.86

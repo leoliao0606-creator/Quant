@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import fields, replace
 from pathlib import Path
 
 from ibkr_ml.backtest import simulate_probability_strategy
+from ibkr_ml.config import RiskConfig
 from ibkr_ml.modeling import load_model_bundle
 
 
@@ -53,12 +55,33 @@ def main() -> None:
         else model_config.get("max_active_positions", 2)
     )
 
+    # Rebuild the risk rules the model was trained against, so replaying the
+    # saved predictions reproduces the numbers the deployment gate reads.
+    # Bundles trained before risk_config was stored fall back to the defaults.
+    stored_risk_config = bundle.get("risk_config")
+    if stored_risk_config:
+        risk_config = replace(
+            RiskConfig(),
+            **{
+                key: value
+                for key, value in stored_risk_config.items()
+                if key in {field.name for field in fields(RiskConfig)} and key != "log_dir"
+            },
+        )
+    else:
+        risk_config = RiskConfig()
+        print(
+            "note: this bundle predates stored risk settings, "
+            "replaying with RiskConfig defaults"
+        )
+
     result = simulate_probability_strategy(
         prediction_rows=prediction_rows,
         entry_probability=float(entry_probability),
         exit_probability=float(exit_probability),
         transaction_cost_bps=float(transaction_cost_bps),
         max_active_positions=max_active_positions,
+        risk_config=risk_config,
     )
 
     print(f"Split: {args.split}")
@@ -72,6 +95,13 @@ def main() -> None:
     print(f"Annualized volatility: {result['annualized_volatility']:.4f}")
     print(f"Sharpe: {result['sharpe']:.4f}")
     print(f"Max drawdown: {result['max_drawdown']:.4f}")
+    print(
+        "Risk rules replayed: "
+        f"stop_loss={risk_config.stop_loss_pct} "
+        f"take_profit={risk_config.take_profit_pct} "
+        f"daily_trades={risk_config.max_daily_trade_count} "
+        f"daily_loss={risk_config.max_daily_loss_pct}"
+    )
 
 
 if __name__ == "__main__":

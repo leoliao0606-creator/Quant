@@ -42,7 +42,47 @@ def generate_trade_decision(
     risk_config,
     daily_loss_limit_hit: bool,
     allow_new_position: bool = True,
+    risk_exit_only: bool = False,
+    blocked_reason: str = "risk_exit_only",
+    force_flat: bool = False,
 ) -> TradeDecision:
+    """Decide what to do with one symbol for this cycle.
+
+    When ``risk_exit_only`` is True the caller could not produce a trustworthy
+    model probability for this cycle (stale bars, or the same bar as last
+    cycle). Protective exits still run, because stop loss, take profit and the
+    daily loss limit only depend on the position and the last price, never on
+    the model. Model driven entries and exits are skipped and the decision
+    falls back to HOLD with ``blocked_reason``.
+
+    When ``force_flat`` is True the session is ending and the position has to
+    go, whatever else the rules say.
+    """
+    if force_flat:
+        # Checked ahead of every other rule, the protective stops included.
+        # The model predicts three five-minute bars ahead, so a position held
+        # overnight is exposed to a gap it was never trained on, for seventeen
+        # hours during which no intraday stop can act on it.
+        if current_quantity > 0:
+            return TradeDecision(
+                symbol=symbol,
+                action="SELL",
+                probability_up=probability_up,
+                current_quantity=current_quantity,
+                target_quantity=0,
+                last_price=last_price,
+                reason="session_close_flatten",
+            )
+        return TradeDecision(
+            symbol=symbol,
+            action="HOLD",
+            probability_up=probability_up,
+            current_quantity=0,
+            target_quantity=0,
+            last_price=last_price,
+            reason="session_close_already_flat",
+        )
+
     if current_quantity > 0 and average_cost > 0.0:
         pnl_pct = last_price / average_cost - 1.0
         if pnl_pct <= -risk_config.stop_loss_pct:
@@ -85,6 +125,17 @@ def generate_trade_decision(
             target_quantity=current_quantity,
             last_price=last_price,
             reason="daily_loss_limit_halt",
+        )
+
+    if risk_exit_only:
+        return TradeDecision(
+            symbol=symbol,
+            action="HOLD",
+            probability_up=probability_up,
+            current_quantity=current_quantity,
+            target_quantity=current_quantity,
+            last_price=last_price,
+            reason=blocked_reason,
         )
 
     if current_quantity == 0 and probability_up >= model_config.entry_probability:

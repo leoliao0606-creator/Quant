@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+from .config import ModelConfig, RiskConfig
+from .strategy import generate_trade_decision
+
 
 def _load_numpy():
     try:
@@ -37,121 +42,311 @@ def _max_drawdown(equity_curve):
     return float(drawdown.min())
 
 
+@dataclass(slots=True)
+class _SimulatedPosition:
+    quantity: int = 0
+    average_cost: float = 0.0
+
+
+class _PortfolioSimulator:
+    """Replay prediction rows through the decision function the live loop uses.
+
+    The previous simulator carried its own rule - "probability above the entry
+    threshold means hold one unit" - which shared nothing with
+    strategy.generate_trade_decision beyond the two thresholds. It had no stop
+    loss, no take profit, no daily loss limit, no daily trade cap, and it never
+    closed the book at the end of a session. Since execution.py reads Sharpe
+    and drawdown out of this simulation to decide whether a model may trade
+    unattended, those numbers were describing a strategy nobody would run.
+
+    Routing every decision through generate_trade_decision means a rule can no
+    longer exist on one side only: adding one to strategy.py changes both the
+    live loop and the backtest.
+
+    Known gaps, both of which make the result optimistic:
+      - Fills happen at the same bar close the decision was made on. In reality
+        that close is only known once the bar has ended, so a live market order
+        fills in the next bar.
+      - The book is flattened on the last bar of each day rather than at
+        flatten_time_et, because bar timestamps carry no timezone.
+    """
+
+    def __init__(
+        self,
+        model_config,
+        risk_config,
+        transaction_cost_bps: float,
+        starting_equity: float,
+        max_active_positions: int | None,
+    ) -> None:
+        self.model_config = model_config
+        self.risk_config = risk_config
+        self.cost_rate = float(transaction_cost_bps) / 10000.0
+        self.starting_equity = float(starting_equity)
+        self.max_active_positions = max_active_positions
+
+        self.cash = float(starting_equity)
+        self.positions: dict[str, _SimulatedPosition] = {}
+        self.last_price: dict[str, float] = {}
+        self.current_date = None
+        self.session_start_equity = float(starting_equity)
+        self.daily_trade_count = 0
+        self.trade_count = 0
+        self.records: list[dict] = []
+
+    def _position(self, symbol: str) -> _SimulatedPosition:
+        return self.positions.setdefault(symbol, _SimulatedPosition())
+
+    def _equity(self) -> float:
+        """Cash plus holdings marked at the most recent price seen per symbol.
+
+        A symbol can be missing from a timestamp when its features were dropped
+        for that bar, so the last known price is carried forward rather than
+        treating the holding as worthless.
+        """
+        value = self.cash
+        for symbol, position in self.positions.items():
+            if position.quantity:
+                value += position.quantity * self.last_price.get(symbol, position.average_cost)
+        return value
+
+    def _roll_daily_state(self, trade_date) -> None:
+        if self.current_date == trade_date:
+            return
+        self.current_date = trade_date
+        self.session_start_equity = self._equity()
+        self.daily_trade_count = 0
+
+    def _daily_loss_limit_hit(self, equity: float) -> bool:
+        threshold = self.session_start_equity * (1.0 - self.risk_config.max_daily_loss_pct)
+        return equity <= threshold
+
+    def _available_entry_slots(self, active_after_exits: int) -> int | None:
+        slots = None
+        if self.max_active_positions is not None and self.max_active_positions > 0:
+            slots = max(self.max_active_positions - active_after_exits, 0)
+
+        cap = getattr(self.risk_config, "max_daily_trade_count", None)
+        if cap is not None:
+            remaining = max(int(cap) - self.daily_trade_count, 0)
+            slots = remaining if slots is None else min(slots, remaining)
+        return slots
+
+    def _execute(self, decision, price: float) -> None:
+        delta = decision.target_quantity - decision.current_quantity
+        if delta == 0 or price <= 0.0:
+            return
+
+        position = self._position(decision.symbol)
+        notional = abs(delta) * price
+
+        # Buying spends cash, selling returns it; the cost is always paid out.
+        self.cash -= delta * price
+        self.cash -= notional * self.cost_rate
+
+        if delta > 0:
+            previous_value = position.quantity * position.average_cost
+            position.quantity += delta
+            position.average_cost = (previous_value + delta * price) / position.quantity
+        else:
+            position.quantity += delta
+            if position.quantity <= 0:
+                position.quantity = 0
+                position.average_cost = 0.0
+
+        self.trade_count += 1
+        self.daily_trade_count += 1
+
+    def step(self, timestamp, timestamp_rows, force_flat: bool) -> None:
+        """Process every symbol quoted at one timestamp, in live-loop order."""
+        for row in timestamp_rows.itertuples(index=False):
+            self.last_price[row.symbol] = float(row.close)
+
+        self._roll_daily_state(getattr(timestamp, "date", lambda: timestamp)())
+        equity = self._equity()
+        daily_loss_limit_hit = self._daily_loss_limit_hit(equity)
+
+        ranked_rows = list(
+            timestamp_rows.sort_values("probability_up", ascending=False).itertuples(index=False)
+        )
+
+        # First pass with entries suppressed, exactly as _run_cycle does it, so
+        # the slot count reflects the positions that survive this bar's exits.
+        preliminary = {}
+        for row in ranked_rows:
+            position = self._position(row.symbol)
+            preliminary[row.symbol] = generate_trade_decision(
+                symbol=row.symbol,
+                probability_up=float(row.probability_up),
+                last_price=float(row.close),
+                current_quantity=position.quantity,
+                average_cost=position.average_cost,
+                equity=equity,
+                model_config=self.model_config,
+                risk_config=self.risk_config,
+                daily_loss_limit_hit=daily_loss_limit_hit,
+                allow_new_position=False,
+                force_flat=force_flat,
+            )
+
+        active_after_exits = sum(
+            1 for decision in preliminary.values() if decision.target_quantity > 0
+        )
+        available_slots = self._available_entry_slots(active_after_exits)
+
+        entry_candidates = [
+            row
+            for row in ranked_rows
+            if self._position(row.symbol).quantity == 0
+            and float(row.probability_up) >= float(self.model_config.entry_probability)
+        ]
+        if available_slots is None:
+            allowed_entries = {row.symbol for row in entry_candidates}
+        else:
+            allowed_entries = {row.symbol for row in entry_candidates[:available_slots]}
+
+        for row in ranked_rows:
+            position = self._position(row.symbol)
+            allow_new_position = position.quantity > 0 or row.symbol in allowed_entries
+            decision = generate_trade_decision(
+                symbol=row.symbol,
+                probability_up=float(row.probability_up),
+                last_price=float(row.close),
+                current_quantity=position.quantity,
+                average_cost=position.average_cost,
+                equity=equity,
+                model_config=self.model_config,
+                risk_config=self.risk_config,
+                daily_loss_limit_hit=daily_loss_limit_hit,
+                allow_new_position=allow_new_position,
+                force_flat=force_flat,
+            )
+            self._execute(decision, float(row.close))
+
+        closing_equity = self._equity()
+        invested = closing_equity - self.cash
+        self.records.append(
+            {
+                "timestamp": timestamp,
+                "equity": closing_equity,
+                "active_positions": sum(
+                    1 for position in self.positions.values() if position.quantity
+                ),
+                "exposure": invested / closing_equity if closing_equity > 0.0 else 0.0,
+            }
+        )
+
+
+def _empty_result(entry_probability, exit_probability, max_active_positions):
+    pd = _load_pandas()
+    return {
+        "entry_probability": float(entry_probability),
+        "exit_probability": float(exit_probability),
+        "max_active_positions": max_active_positions,
+        "trade_count": 0,
+        "exposure": 0.0,
+        "total_return": 0.0,
+        "annualized_return": 0.0,
+        "annualized_volatility": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "equity_curve": pd.DataFrame(columns=["timestamp", "portfolio_return", "equity_curve"]),
+    }
+
+
 def simulate_probability_strategy(
     prediction_rows,
     entry_probability: float,
     exit_probability: float,
     transaction_cost_bps: float = 0.0,
     max_active_positions: int | None = None,
+    risk_config=None,
+    starting_equity: float | None = None,
 ):
+    """Replay predictions through the live decision rules and score the result.
+
+    risk_config defaults to RiskConfig(), so stop loss, take profit, the daily
+    loss limit and the daily trade cap are all active with the same defaults
+    the paper trader ships with. Pass the risk_config actually being deployed
+    to keep the two in step.
+    """
     pd = _load_pandas()
     np = _load_numpy()
 
-    required_columns = {"timestamp", "symbol", "probability_up", "next_bar_return"}
+    required_columns = {"timestamp", "symbol", "probability_up", "close"}
     missing_columns = required_columns.difference(prediction_rows.columns)
     if missing_columns:
         raise ValueError(f"Missing columns for backtest: {sorted(missing_columns)}")
 
-    rows = prediction_rows.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
     if max_active_positions is not None and max_active_positions <= 0:
         max_active_positions = None
 
-    position_by_symbol = {symbol: 0 for symbol in rows["symbol"].unique().tolist()}
-    symbol_records = []
-    trade_count = 0
+    if risk_config is None:
+        risk_config = RiskConfig()
+    if starting_equity is None:
+        starting_equity = float(risk_config.starting_capital)
 
-    for timestamp, timestamp_rows in rows.groupby("timestamp", sort=True):
-        ranked_rows = timestamp_rows.sort_values("probability_up", ascending=False)
-        changed_symbols = set()
-
-        for row in ranked_rows.itertuples(index=False):
-            if position_by_symbol[row.symbol] == 1 and row.probability_up <= exit_probability:
-                position_by_symbol[row.symbol] = 0
-                changed_symbols.add(row.symbol)
-                trade_count += 1
-
-        current_active_positions = sum(position_by_symbol.values())
-        available_slots = None
-        if max_active_positions is not None:
-            available_slots = max(max_active_positions - current_active_positions, 0)
-
-        entry_candidates = []
-        for row in ranked_rows.itertuples(index=False):
-            if position_by_symbol[row.symbol] == 0 and row.probability_up >= entry_probability:
-                entry_candidates.append(row)
-
-        if available_slots is None:
-            allowed_entries = entry_candidates
-        else:
-            allowed_entries = entry_candidates[:available_slots]
-
-        for row in allowed_entries:
-            if position_by_symbol[row.symbol] == 0:
-                position_by_symbol[row.symbol] = 1
-                changed_symbols.add(row.symbol)
-                trade_count += 1
-
-        for row in ranked_rows.itertuples(index=False):
-            transaction_cost = 0.0
-            if row.symbol in changed_symbols:
-                transaction_cost = transaction_cost_bps / 10000.0
-
-            strategy_return = position_by_symbol[row.symbol] * float(row.next_bar_return) - transaction_cost
-            symbol_records.append(
-                {
-                    "timestamp": timestamp,
-                    "symbol": row.symbol,
-                    "position": position_by_symbol[row.symbol],
-                    "strategy_return": strategy_return,
-                }
-            )
-
-    if not symbol_records:
-        empty = pd.DataFrame(columns=["timestamp", "portfolio_return", "equity_curve"])
-        return {
-            "entry_probability": float(entry_probability),
-            "exit_probability": float(exit_probability),
-            "max_active_positions": max_active_positions,
-            "trade_count": 0,
-            "exposure": 0.0,
-            "total_return": 0.0,
-            "annualized_return": 0.0,
-            "annualized_volatility": 0.0,
-            "sharpe": 0.0,
-            "max_drawdown": 0.0,
-            "equity_curve": empty,
-        }
-
-    symbol_frame = pd.DataFrame(symbol_records)
-    portfolio = (
-        symbol_frame.groupby("timestamp", sort=True)
-        .agg(
-            portfolio_return=("strategy_return", "mean"),
-            active_positions=("position", "sum"),
-        )
-        .reset_index()
+    model_config = ModelConfig(
+        entry_probability=float(entry_probability),
+        exit_probability=float(exit_probability),
+        transaction_cost_bps=float(transaction_cost_bps),
     )
-    portfolio["equity_curve"] = (1.0 + portfolio["portfolio_return"]).cumprod()
+
+    rows = prediction_rows.copy()
+    rows["timestamp"] = pd.to_datetime(rows["timestamp"])
+    rows = rows.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
+    if rows.empty:
+        return _empty_result(entry_probability, exit_probability, max_active_positions)
+
+    # The live loop flattens at flatten_time_et. Bar timestamps carry no
+    # timezone, so the last bar of each day stands in for that moment here.
+    last_bar_per_day = set(
+        rows.groupby(rows["timestamp"].dt.date)["timestamp"].max().tolist()
+    )
+
+    simulator = _PortfolioSimulator(
+        model_config=model_config,
+        risk_config=risk_config,
+        transaction_cost_bps=transaction_cost_bps,
+        starting_equity=starting_equity,
+        max_active_positions=max_active_positions,
+    )
+    for timestamp, timestamp_rows in rows.groupby("timestamp", sort=True):
+        simulator.step(
+            timestamp=timestamp,
+            timestamp_rows=timestamp_rows,
+            force_flat=timestamp in last_bar_per_day,
+        )
+
+    if not simulator.records:
+        return _empty_result(entry_probability, exit_probability, max_active_positions)
+
+    portfolio = pd.DataFrame(simulator.records)
+    portfolio["equity_curve"] = portfolio["equity"] / starting_equity
+    portfolio["portfolio_return"] = portfolio["equity_curve"].pct_change().fillna(
+        portfolio["equity_curve"].iloc[0] - 1.0
+    )
 
     periods_per_year = _infer_periods_per_year(portfolio["timestamp"])
     mean_return = float(portfolio["portfolio_return"].mean())
     volatility = float(portfolio["portfolio_return"].std(ddof=0))
-    annualized_return = float((portfolio["equity_curve"].iloc[-1] ** (periods_per_year / max(len(portfolio), 1))) - 1.0)
-    annualized_volatility = float(volatility * np.sqrt(periods_per_year))
+    final_equity_ratio = float(portfolio["equity_curve"].iloc[-1])
+    annualized_return = float(
+        max(final_equity_ratio, 0.0) ** (periods_per_year / max(len(portfolio), 1)) - 1.0
+    )
     sharpe = 0.0
     if volatility > 0.0:
         sharpe = float(mean_return / volatility * np.sqrt(periods_per_year))
 
-    exposure = float(symbol_frame["position"].mean()) if not symbol_frame.empty else 0.0
     return {
         "entry_probability": float(entry_probability),
         "exit_probability": float(exit_probability),
         "max_active_positions": max_active_positions,
-        "trade_count": int(trade_count),
-        "exposure": exposure,
-        "total_return": float(portfolio["equity_curve"].iloc[-1] - 1.0),
+        "trade_count": int(simulator.trade_count),
+        "exposure": float(portfolio["exposure"].mean()),
+        "total_return": final_equity_ratio - 1.0,
         "annualized_return": annualized_return,
-        "annualized_volatility": annualized_volatility,
+        "annualized_volatility": float(volatility * np.sqrt(periods_per_year)),
         "sharpe": sharpe,
         "max_drawdown": _max_drawdown(portfolio["equity_curve"]),
         "equity_curve": portfolio[["timestamp", "portfolio_return", "equity_curve"]].copy(),
@@ -163,6 +358,7 @@ def select_probability_thresholds(
     transaction_cost_bps: float,
     threshold_hysteresis: float,
     max_active_positions: int | None,
+    risk_config=None,
 ):
     np = _load_numpy()
 
@@ -177,6 +373,7 @@ def select_probability_thresholds(
             exit_probability=float(exit_probability),
             transaction_cost_bps=transaction_cost_bps,
             max_active_positions=max_active_positions,
+            risk_config=risk_config,
         )
         if result["trade_count"] < 4:
             continue
@@ -201,6 +398,7 @@ def select_probability_thresholds(
         exit_probability=fallback_exit,
         transaction_cost_bps=transaction_cost_bps,
         max_active_positions=max_active_positions,
+        risk_config=risk_config,
     )
     return {
         "score": (result["sharpe"], result["total_return"], -abs(result["exposure"] - 0.35)),

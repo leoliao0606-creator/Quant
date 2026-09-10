@@ -9,3 +9,7 @@ logs_test/
 .venv-pi/
 
 .DS_Store
+.venv/
+.pytest_cache/
+tests/__pycache__/
+data_cache/

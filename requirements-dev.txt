@@ -1,0 +1,5 @@
+# Test-only dependencies, on top of requirements.txt:
+#   conda activate ibkr_trade
+#   python -m pip install -r requirements-dev.txt
+#   python -m pytest
+pytest==9.1.1
