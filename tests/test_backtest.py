@@ -360,3 +360,53 @@ class TestPercentileThresholdSearch:
         selection = self.select(rows)
         assert selection["probability_ceiling"] <= rows["probability_up"].max()
         assert selection["probability_ceiling"] > rows["probability_up"].median()
+
+
+class TestPurgedSplits:
+    """Labels read ahead, so rows next to a split boundary leak across it.
+
+    The last horizon_bars rows before a boundary carry targets built from
+    prices that land in the next split. Training on them lets the model see,
+    through its own label, data it is about to be scored on - and validation
+    is what selects the entry threshold.
+    """
+
+    def test_purge_scales_with_horizon_and_symbol_count(self):
+        from ibkr_ml.modeling import _purge_rows
+
+        assert _purge_rows(None, 0, 12, 69) == 828
+        assert _purge_rows(None, 0, 3, 5) == 15
+        assert _purge_rows(None, 0, 0, 69) == 0
+
+    def test_training_shrinks_but_validation_does_not(self):
+        from ibkr_ml.modeling import _split_indices
+
+        train_purged, train_end, validation_end = _split_indices(
+            row_count=10000, train_split=0.7, validation_split=0.15, purge=100
+        )
+        assert train_purged == train_end - 100
+        assert train_end == 7000          # boundary itself is unmoved
+        assert validation_end == 8500     # validation keeps every row
+
+    def test_no_purge_leaves_the_split_untouched(self):
+        from ibkr_ml.modeling import _split_indices
+
+        train_purged, train_end, _ = _split_indices(
+            row_count=10000, train_split=0.7, validation_split=0.15, purge=0
+        )
+        assert train_purged == train_end
+
+    def test_an_oversized_purge_keeps_half_the_training_set(self, capsys):
+        """A purge bigger than the training set is a configuration problem.
+
+        It means the label horizon is long relative to the data. Silently
+        training on one row would be worse than saying so.
+        """
+        from ibkr_ml.modeling import _split_indices
+
+        train_purged, train_end, validation_end = _split_indices(
+            row_count=1000, train_split=0.7, validation_split=0.15, purge=100000
+        )
+        assert train_purged == train_end // 2
+        assert train_purged < validation_end
+        assert "horizon is long relative to the data" in capsys.readouterr().out

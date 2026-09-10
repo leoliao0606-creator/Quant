@@ -104,7 +104,24 @@ def _build_metrics(y_true, probabilities, decision_threshold: float):
     return metrics
 
 
-def _split_indices(row_count: int, train_split: float, validation_split: float):
+def _purge_rows(dataset, boundary: int, horizon_bars: int, symbol_count: int) -> int:
+    """Rows to discard on the training side of a split boundary.
+
+    A label reads horizon_bars ahead, so the last rows before a boundary carry
+    labels built from prices that appear after it. Leaving them in lets the
+    model see, through its own target, data it is about to be scored on. With
+    69 symbols and a 12-bar horizon that is 828 rows - small, but they sit
+    exactly at the boundary, and validation is what picks the threshold.
+    """
+    return max(int(horizon_bars) * max(int(symbol_count), 1), 0)
+
+
+def _split_indices(
+    row_count: int,
+    train_split: float,
+    validation_split: float,
+    purge: int = 0,
+):
     train_end = int(row_count * train_split)
     validation_end = int(row_count * (train_split + validation_split))
     train_end = max(train_end, 1)
@@ -114,7 +131,22 @@ def _split_indices(row_count: int, train_split: float, validation_split: float):
         raise ValueError(
             "Invalid train/validation/test split. Adjust train_split and validation_split in ModelConfig."
         )
-    return train_end, validation_end
+
+    # Purge only shortens training; validation and test keep every row, so the
+    # measured performance still covers the whole period.
+    train_purged = max(train_end - purge, 1)
+
+    # A purge large enough to gut the training set means the horizon is too
+    # long for the data available, not that half the history should be thrown
+    # away silently. Keep at least half and let the caller see the number.
+    minimum_train = max(train_end // 2, 1)
+    if train_purged < minimum_train:
+        print(
+            f"warning: purging {purge} rows would leave {train_purged} for training; "
+            f"keeping {minimum_train}. The label horizon is long relative to the data."
+        )
+        train_purged = minimum_train
+    return train_purged, train_end, validation_end
 
 
 def _feature_importance_rows(model, columns):
@@ -230,8 +262,12 @@ def _run_walk_forward_analysis(dataset, features, targets, model_config, risk_co
         ),
         start=1,
     ):
-        x_train = features.iloc[:train_end]
-        y_train = targets.iloc[:train_end]
+        purge = _purge_rows(
+            dataset, train_end, model_config.horizon_bars, dataset["symbol"].nunique()
+        )
+        train_purged = max(train_end - purge, 1)
+        x_train = features.iloc[:train_purged]
+        y_train = targets.iloc[:train_purged]
         x_validation = features.iloc[train_end:validation_end]
         y_validation = targets.iloc[train_end:validation_end]
         x_test = features.iloc[validation_end:test_end]
@@ -274,6 +310,7 @@ def _run_walk_forward_analysis(dataset, features, targets, model_config, risk_co
             {
                 "fold": fold_number,
                 "train_rows": int(len(x_train)),
+                "purged_rows": int(purge),
                 "validation_rows": int(len(x_validation)),
                 "test_rows": int(len(x_test)),
                 "entry_probability": float(threshold_selection["entry_probability"]),
@@ -384,16 +421,22 @@ def train_model_from_frames(
     features = _encode_features(dataset, active_feature_columns)
     targets = dataset["target"].astype(int)
 
-    train_end, validation_end = _split_indices(
+    purge = _purge_rows(
+        dataset, 0, model_config.horizon_bars, dataset["symbol"].nunique()
+    )
+    train_purged, train_end, validation_end = _split_indices(
         row_count=len(dataset),
         train_split=model_config.train_split,
         validation_split=model_config.validation_split,
+        purge=purge,
     )
+    if purge:
+        print(f"Purged {train_end - train_purged} rows straddling the train/validation boundary")
 
-    x_train = features.iloc[:train_end]
+    x_train = features.iloc[:train_purged]
     x_validation = features.iloc[train_end:validation_end]
     x_test = features.iloc[validation_end:]
-    y_train = targets.iloc[:train_end]
+    y_train = targets.iloc[:train_purged]
     y_validation = targets.iloc[train_end:validation_end]
     y_test = targets.iloc[validation_end:]
 

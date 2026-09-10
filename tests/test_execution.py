@@ -635,3 +635,83 @@ class TestThresholdQualityGate:
         bundle["walk_forward_summary"].pop("qualified_folds", None)
 
         assert make_trader(bundle=bundle) is not None
+
+
+class TestLiveRulesMatchBacktest:
+    """Rules added to the backtest must exist live, or the numbers are fiction.
+
+    This project's original defect was exactly this: the backtest measured a
+    strategy the live loop did not run. Three rules were added to the backtest
+    (minimum holding, no entry near the close, gross exposure cap) and at first
+    none of them reached execution.py - the backtested +7.40% annualised would
+    have been unobtainable.
+    """
+
+    def test_holding_periods_advance_each_cycle(self, make_trader):
+        trader = make_trader()
+        held = type("P", (), {"quantity": 100, "average_cost": 50.0})()
+
+        trader._update_holding_periods({"AAA": held})
+        assert trader.bars_held["AAA"] == 1
+        trader._update_holding_periods({"AAA": held})
+        assert trader.bars_held["AAA"] == 2
+
+    def test_a_closed_position_resets_its_counter(self, make_trader):
+        trader = make_trader()
+        held = type("P", (), {"quantity": 100, "average_cost": 50.0})()
+        flat = type("P", (), {"quantity": 0, "average_cost": 0.0})()
+
+        trader._update_holding_periods({"AAA": held})
+        trader._update_holding_periods({"AAA": flat})
+        assert "AAA" not in trader.bars_held
+
+        trader._update_holding_periods({"AAA": held})
+        assert trader.bars_held["AAA"] == 1
+
+    def test_bars_to_close_counts_down_toward_the_flatten(self, make_trader):
+        trader = make_trader(
+            market_config=MarketDataConfig(symbols=("AAA",), bar_size="5 mins"),
+            risk_config=RiskConfig(flatten_time_et="15:45"),
+        )
+        # 14:45 is an hour before the flatten: twelve 5-minute bars.
+        assert trader._bars_to_session_close(et("2026-01-05 14:45")) == 12
+        assert trader._bars_to_session_close(et("2026-01-05 15:40")) == 1
+        assert trader._bars_to_session_close(et("2026-01-05 15:50")) == 0
+
+    def test_bar_size_is_respected_in_that_count(self, make_trader):
+        trader = make_trader(
+            market_config=MarketDataConfig(symbols=("AAA",), bar_size="1 hour"),
+            risk_config=RiskConfig(flatten_time_et="15:45"),
+        )
+        # The same hour is one bar, not twelve.
+        assert trader._bars_to_session_close(et("2026-01-05 14:45")) == 1
+
+    def test_gross_cap_trims_an_order_that_would_exceed_it(self, make_trader):
+        trader = make_trader(risk_config=RiskConfig(max_gross_exposure=1.0))
+        positions = {"BBB": type("P", (), {"quantity": 900, "average_cost": 100.0})()}
+        prices = {"BBB": 100.0, "AAA": 100.0}
+        decision = TradeDecision("AAA", "BUY", 0.9, 0, 500, 100.0, "model_entry")
+
+        # 90,000 already held against 100,000 equity leaves room for 100 shares.
+        assert trader._clip_to_gross_cap(decision, positions, 100000.0, prices) == 100
+
+    def test_gross_cap_refuses_when_the_book_is_full(self, make_trader):
+        trader = make_trader(risk_config=RiskConfig(max_gross_exposure=1.0))
+        positions = {"BBB": type("P", (), {"quantity": 1000, "average_cost": 100.0})()}
+        prices = {"BBB": 100.0, "AAA": 100.0}
+        decision = TradeDecision("AAA", "BUY", 0.9, 0, 500, 100.0, "model_entry")
+
+        assert trader._clip_to_gross_cap(decision, positions, 100000.0, prices) == 0
+
+    def test_an_empty_book_is_not_trimmed(self, make_trader):
+        trader = make_trader(risk_config=RiskConfig(max_gross_exposure=1.0))
+        decision = TradeDecision("AAA", "BUY", 0.9, 0, 200, 100.0, "model_entry")
+        assert trader._clip_to_gross_cap(decision, {}, 100000.0, {"AAA": 100.0}) == 200
+
+    def test_the_cap_can_be_switched_off(self, make_trader):
+        trader = make_trader(risk_config=RiskConfig(max_gross_exposure=0))
+        positions = {"BBB": type("P", (), {"quantity": 5000, "average_cost": 100.0})()}
+        decision = TradeDecision("AAA", "BUY", 0.9, 0, 500, 100.0, "model_entry")
+        assert trader._clip_to_gross_cap(
+            decision, positions, 100000.0, {"BBB": 100.0, "AAA": 100.0}
+        ) == 500

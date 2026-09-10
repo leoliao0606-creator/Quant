@@ -46,6 +46,18 @@ class CycleResult:
 # US Eastern wall clock bounds of the tradable session. The start skips the
 # opening auction's first minutes; the end leaves the last few minutes before
 # 16:00 alone, where a market order fills at whatever the closing cross prints.
+def _bar_size_minutes(bar_size: str) -> float:
+    """Minutes in one bar, for converting a clock gap into a bar count."""
+    parts = str(bar_size).strip().split()
+    if len(parts) != 2:
+        return 5.0
+    value, unit = parts
+    unit = unit.lower().rstrip("s")
+    per_unit = {"sec": 1 / 60, "second": 1 / 60, "min": 1.0, "minute": 1.0,
+                "hour": 60.0, "day": 390.0}
+    return float(value) * per_unit.get(unit, 1.0)
+
+
 SESSION_START_ET = "09:35"
 SESSION_END_ET = "15:57"
 
@@ -109,6 +121,12 @@ class IBKRPaperTrader:
         self.daily_trade_count = 0
         self.session_start_equity: float | None = None
         self.last_processed_bar_timestamp: dict[str, str] = {}
+        # Bars a position has been held, counted per symbol. The backtest gets
+        # this from its loop; live, it has to be accumulated across cycles.
+        # Without it minimum_holding_bars silently does nothing, and the model
+        # closes positions long before the horizon it was trained on - measured
+        # at 12x the annualised return.
+        self.bars_held: dict[str, int] = {}
         # Reference series this model was trained against, e.g. {"mkt": "SPY"}.
         # Empty for a model trained without cross-asset features.
         self.reference_symbols = dict(self.bundle.get("reference_symbols") or {})
@@ -419,6 +437,52 @@ class IBKRPaperTrader:
         original_type = getattr(exc, "original_type", None) or exc.__class__.__name__
         return f"data_error:{original_type}"
 
+    def _update_holding_periods(self, positions) -> None:
+        """Advance the per-symbol bar counter once per processed bar."""
+        for symbol in list(self.bars_held):
+            if symbol not in positions or positions[symbol].quantity <= 0:
+                del self.bars_held[symbol]
+        for symbol, position in positions.items():
+            if position.quantity > 0:
+                self.bars_held[symbol] = self.bars_held.get(symbol, 0) + 1
+
+    def _bars_to_session_close(self, now_et: datetime) -> int:
+        """Bars left before the flatten window, in units of the model's bar size."""
+        minutes = _bar_size_minutes(self.market_config.bar_size)
+        flatten_at = datetime.combine(now_et.date(), self._flatten_time()).replace(
+            tzinfo=now_et.tzinfo
+        )
+        remaining = (flatten_at - now_et).total_seconds() / 60.0
+        return max(int(remaining // minutes), 0)
+
+    def _gross_exposure(self, positions, equity: float, prices: dict) -> float:
+        if equity <= 0.0:
+            return 0.0
+        held = sum(
+            abs(p.quantity) * prices.get(s, p.average_cost)
+            for s, p in positions.items() if p.quantity
+        )
+        return held / equity
+
+    def _clip_to_gross_cap(self, decision, positions, equity: float, prices: dict) -> int:
+        """Trim an opening order so the book stays inside max_gross_exposure.
+
+        max_position_fraction and max_active_positions multiply if nothing
+        stops them: 10% across 10 slots is 100%, but raising either without
+        this cap produced 504% gross in测试 and tripped the daily breaker.
+        """
+        cap = float(getattr(self.risk_config, "max_gross_exposure", 0) or 0)
+        delta = decision.target_quantity - decision.current_quantity
+        if cap <= 0 or delta <= 0 or equity <= 0.0 or decision.last_price <= 0:
+            return delta
+        room = (cap - self._gross_exposure(positions, equity, prices)) * equity
+        if room <= 0:
+            return 0
+        # The epsilon absorbs binary rounding: (1.0 - 0.9) * 100000 comes
+        # out as 9999.999999999998, which floor-divides to one share less
+        # than the cap allows, every time.
+        return min(delta, int((room + 1e-6) // decision.last_price))
+
     def _positions(self, ib):
         positions = {}
         for item in ib.positions():
@@ -712,6 +776,7 @@ class IBKRPaperTrader:
                 risk_config=self.risk_config,
                 daily_loss_limit_hit=daily_loss_limit_hit,
                 force_flat=True,
+                bars_held=self.bars_held.get(symbol, 0),
             )
             decisions.append(decision)
             if not dry_run and decision.action == "SELL":
@@ -742,6 +807,7 @@ class IBKRPaperTrader:
         self._roll_daily_state(now_et.date(), equity)
         phase = self._session_phase(now_et)
         positions = self._positions(ib)
+        self._update_holding_periods(positions)
         daily_loss_limit_hit = self._daily_loss_limit_hit(equity)
 
         if phase.is_closed:
@@ -840,6 +906,8 @@ class IBKRPaperTrader:
                             allow_new_position=False,
                             risk_exit_only=True,
                             blocked_reason=blocked_reason,
+                            bars_held=self.bars_held.get(symbol, 0),
+                            bars_to_close=self._bars_to_session_close(now_et),
                         )
                     )
                     continue
@@ -890,6 +958,8 @@ class IBKRPaperTrader:
                 risk_config=self.risk_config,
                 daily_loss_limit_hit=daily_loss_limit_hit,
                 allow_new_position=False,
+                bars_held=self.bars_held.get(snapshot.symbol, 0),
+                bars_to_close=self._bars_to_session_close(now_et),
             )
 
         active_after_exits = sum(
@@ -939,7 +1009,22 @@ class IBKRPaperTrader:
                 risk_config=self.risk_config,
                 daily_loss_limit_hit=daily_loss_limit_hit,
                 allow_new_position=allow_new_position,
+                bars_held=self.bars_held.get(snapshot.symbol, 0),
+                bars_to_close=self._bars_to_session_close(now_et),
             )
+
+            # Same gross cap the backtest applies. Without it a run of strong
+            # signals stacks 10 positions of max_position_fraction each.
+            if decision.action == "BUY":
+                prices = {s.symbol: s.last_price for s in snapshots}
+                allowed = self._clip_to_gross_cap(decision, positions, equity, prices)
+                if allowed <= 0:
+                    decision.action = "HOLD"
+                    decision.target_quantity = decision.current_quantity
+                    decision.reason = "gross_exposure_cap"
+                else:
+                    decision.target_quantity = decision.current_quantity + allowed
+
             decisions.append(decision)
             self.last_processed_bar_timestamp[snapshot.symbol] = snapshot.latest_bar_key
             if not dry_run and decision.action in {"BUY", "SELL"}:

@@ -165,7 +165,9 @@ class _PortfolioSimulator:
         room = (cap - self._gross_exposure(equity)) * equity
         if room <= 0:
             return 0
-        return min(delta, int(room // price))
+        # See execution._clip_to_gross_cap: binary rounding otherwise
+        # costs one share on every capped order.
+        return min(delta, int((room + 1e-6) // price))
 
     def _execute(self, decision, price: float, timestamp=None) -> None:
         delta = decision.target_quantity - decision.current_quantity
