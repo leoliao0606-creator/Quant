@@ -40,6 +40,10 @@ class MarketDataConfig:
 
 @dataclass(slots=True)
 class ModelConfig:
+    # gradient_boosting is exact and ~6x slower; hist_gradient_boosting bins
+    # features first. Measured: AUC 0.6649 vs 0.6548, top-3% signal return
+    # 0.3530% vs 0.3089%. Explore with the fast one, confirm with the exact one.
+    model_type: str = "gradient_boosting"
     horizon_bars: int = 3
     # How the forward return becomes a label. "absolute" compares it with
     # positive_return_threshold; "volatility_scaled" compares it with
@@ -65,6 +69,13 @@ class ModelConfig:
     # probability range at training time. Left at None it falls back to 1.0,
     # which compresses every real signal into the lower half of the scale.
     probability_ceiling: float | None = None
+    # Recompute the entry cutoff from the most recent this-many bars of the
+    # model's own output, instead of freezing the number found at training
+    # time. Measured: the probability median drifted from 0.520 to 0.468 over
+    # six months, and a cutoff fixed at 0.7203 selected 1.68% of bars in June
+    # and 0.00% in September - the strategy stopped trading without anything
+    # being wrong with it. Zero keeps the fixed cutoff.
+    adaptive_threshold_window: int = 0
     threshold_hysteresis: float = 0.06
     # One-way cost in basis points (1 bps = 0.01%), charged on every position
     # change. The old default of 1.0 covered roughly the quoted spread and
@@ -94,6 +105,13 @@ class RiskConfig:
     # measured on held-out data, the top 1% of signals returned 0.96% while a
     # median qualifying signal returned 0.05%. Sizing them alike pays the same
     # cost on both, so the weak trades consume what the strong ones earn.
+    # Cap on the sum of all positions, as a fraction of equity. Without it,
+    # max_position_fraction and max_active_positions multiply: 50% each across
+    # 10 slots is 500% of the account, i.e. 5x leverage. That is how a set of
+    # positions each down less than 1.6% combined into a 2% account loss and
+    # tripped the daily circuit breaker, turning small paper losses into
+    # realised ones. 1.0 means never borrow.
+    max_gross_exposure: float = 1.0
     position_sizing: str = "fixed"
     # Hold at least this many bars before the model is allowed to close a
     # position. The label measures the return over horizon_bars; letting a

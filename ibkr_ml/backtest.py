@@ -99,6 +99,8 @@ class _PortfolioSimulator:
         self.open_positions: dict[str, dict] = {}
         self.closed_trades: list[dict] = []
         self.records: list[dict] = []
+        self.recent_probabilities: list[float] = []
+        self.entry_percentile = None
 
     def _position(self, symbol: str) -> _SimulatedPosition:
         return self.positions.setdefault(symbol, _SimulatedPosition())
@@ -137,6 +139,33 @@ class _PortfolioSimulator:
             remaining = max(int(cap) - self.daily_trade_count, 0)
             slots = remaining if slots is None else min(slots, remaining)
         return slots
+
+    def _gross_exposure(self, equity: float) -> float:
+        if equity <= 0.0:
+            return 0.0
+        held = sum(
+            abs(p.quantity) * self.last_price.get(s, p.average_cost)
+            for s, p in self.positions.items() if p.quantity
+        )
+        return held / equity
+
+    def _clip_to_gross_cap(self, decision, price: float, equity: float) -> int:
+        """Trim an opening order so the book stays within the gross cap.
+
+        max_position_fraction and max_active_positions multiply if nothing
+        stops them: ten slots at 50% each is 5x leverage, and a set of
+        positions each down 1% then combines into an account loss large enough
+        to trip the daily breaker.
+        """
+        cap = float(getattr(self.risk_config, "max_gross_exposure", 0) or 0)
+        delta = decision.target_quantity - decision.current_quantity
+        if cap <= 0 or delta <= 0 or equity <= 0.0:
+            return delta
+
+        room = (cap - self._gross_exposure(equity)) * equity
+        if room <= 0:
+            return 0
+        return min(delta, int(room // price))
 
     def _execute(self, decision, price: float, timestamp=None) -> None:
         delta = decision.target_quantity - decision.current_quantity
@@ -194,10 +223,40 @@ class _PortfolioSimulator:
         self.trade_count += 1
         self.daily_trade_count += 1
 
+    def _entry_probability_now(self, recent_probabilities) -> float:
+        """The entry cutoff to use at this instant.
+
+        A cutoff frozen at training time decays with the model's own output
+        distribution. Recomputing it from a trailing window keeps "the top 1%
+        of signals" meaning the same thing in September as it did in April.
+        """
+        window = int(getattr(self.model_config, "adaptive_threshold_window", 0) or 0)
+        if window <= 0 or self.entry_percentile is None:
+            return float(self.model_config.entry_probability)
+        if len(recent_probabilities) < window // 4:
+            return float(self.model_config.entry_probability)
+
+        np = _load_numpy()
+        return float(np.quantile(recent_probabilities[-window:], self.entry_percentile))
+
     def step(self, timestamp, timestamp_rows, force_flat: bool, bars_to_close=None) -> None:
         """Process every symbol quoted at one timestamp, in live-loop order."""
         for row in timestamp_rows.itertuples(index=False):
             self.last_price[row.symbol] = float(row.close)
+            self.recent_probabilities.append(float(row.probability_up))
+
+        window = int(getattr(self.model_config, "adaptive_threshold_window", 0) or 0)
+        if window > 0:
+            # Keep only what the window needs, so a long replay does not grow
+            # without bound.
+            if len(self.recent_probabilities) > window * 2:
+                self.recent_probabilities = self.recent_probabilities[-window:]
+            self.model_config.entry_probability = self._entry_probability_now(
+                self.recent_probabilities
+            )
+            self.model_config.exit_probability = max(
+                self.model_config.entry_probability - 0.06, 0.05
+            )
 
         for position in self.positions.values():
             if position.quantity:
@@ -268,6 +327,10 @@ class _PortfolioSimulator:
             )
             if decision.action == "BUY" and decision.conviction:
                 self.convictions.append(decision.conviction)
+                allowed = self._clip_to_gross_cap(decision, float(row.close), equity)
+                if allowed <= 0:
+                    continue
+                decision.target_quantity = decision.current_quantity + allowed
             self._execute(decision, float(row.close), timestamp)
 
         closing_equity = self._equity()
@@ -280,6 +343,7 @@ class _PortfolioSimulator:
                     1 for position in self.positions.values() if position.quantity
                 ),
                 "exposure": invested / closing_equity if closing_equity > 0.0 else 0.0,
+                "gross_exposure": self._gross_exposure(closing_equity),
             }
         )
 
@@ -294,6 +358,8 @@ def _empty_result(entry_probability, exit_probability, max_active_positions):
         "mean_conviction": 0.0,
         "probability_ceiling": 1.0,
         "exposure": 0.0,
+        "peak_gross_exposure": 0.0,
+        "mean_gross_exposure": 0.0,
         "total_return": 0.0,
         "annualized_return": 0.0,
         "annualized_volatility": 0.0,
@@ -313,6 +379,8 @@ def simulate_probability_strategy(
     risk_config=None,
     starting_equity: float | None = None,
     probability_ceiling: float | None = None,
+    entry_percentile: float | None = None,
+    adaptive_window: int | None = None,
 ):
     """Replay predictions through the live decision rules and score the result.
 
@@ -347,6 +415,7 @@ def simulate_probability_strategy(
         exit_probability=float(exit_probability),
         transaction_cost_bps=float(transaction_cost_bps),
         probability_ceiling=float(probability_ceiling),
+        adaptive_threshold_window=int(adaptive_window or 0),
     )
 
     rows = prediction_rows.copy()
@@ -378,6 +447,8 @@ def simulate_probability_strategy(
     for stamps in per_day.values():
         for offset, stamp in enumerate(stamps):
             remaining_bars[stamp] = len(stamps) - 1 - offset
+
+    simulator.entry_percentile = entry_percentile
 
     for timestamp, timestamp_rows in rows.groupby("timestamp", sort=True):
         simulator.step(
@@ -415,6 +486,10 @@ def simulate_probability_strategy(
         "trade_count": int(simulator.trade_count),
         "mean_conviction": float(np.mean(simulator.convictions)) if simulator.convictions else 0.0,
         "exposure": float(portfolio["exposure"].mean()),
+        # Time-averaged exposure hides the peak: a book that is flat most days
+        # and 350% invested on the rest averages under 1%.
+        "peak_gross_exposure": float(portfolio["gross_exposure"].max()),
+        "mean_gross_exposure": float(portfolio["gross_exposure"].mean()),
         "total_return": final_equity_ratio - 1.0,
         "annualized_return": annualized_return,
         "annualized_volatility": float(volatility * np.sqrt(periods_per_year)),
@@ -494,6 +569,7 @@ def select_probability_thresholds(
             max_active_positions=max_active_positions,
             risk_config=risk_config,
             probability_ceiling=probability_ceiling,
+            entry_percentile=float(percentile),
         )
 
         rejection = _threshold_is_usable(result, min_trade_count, min_exposure)
@@ -534,6 +610,7 @@ def select_probability_thresholds(
         max_active_positions=max_active_positions,
         risk_config=risk_config,
         probability_ceiling=probability_ceiling,
+        entry_percentile=fallback_percentile,
     )
     note = (
         f"no percentile reached {min_trade_count} trades and {min_exposure:.1%} exposure; "

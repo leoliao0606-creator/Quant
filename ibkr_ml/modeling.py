@@ -130,10 +130,54 @@ def _feature_importance_rows(model, columns):
     ]
 
 
-def _fit_classifier(x_train, y_train):
+def _fit_classifier(x_train, y_train, model_type: str = "gradient_boosting"):
+    """Fit the classifier, class-balanced.
+
+    Two implementations of the same model family. The exact one searches every
+    split point and is slower by roughly 6x; the histogram one bins the
+    features first. Measured on 140k rows: 97.7s vs 16.6s, AUC 0.6649 vs
+    0.6548, and - the number that matters - a top-3% signal return of 0.3530%
+    vs 0.3089%. The speed buys exploration; the accuracy is worth having for a
+    result that will be acted on, so both are available.
+    """
     GradientBoostingClassifier, _, _, _, _, _, compute_sample_weight = _load_sklearn()
-    model = GradientBoostingClassifier(random_state=42)
     sample_weight = compute_sample_weight(class_weight="balanced", y=y_train)
+
+    if model_type == "hist_gradient_boosting":
+        from sklearn.ensemble import HistGradientBoostingClassifier
+
+        model = HistGradientBoostingClassifier(random_state=42)
+    elif model_type in ("xgboost", "xgboost_gpu"):
+        try:
+            import xgboost
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "Missing dependency 'xgboost'. Install it, or use "
+                "--model-type gradient_boosting."
+            ) from exc
+
+        # Same model family, split search on the GPU. Training is ~85% of an
+        # experiment's wall clock - the backtest loop takes 3 seconds - so this
+        # is the only place where hardware changes the iteration speed.
+        model = xgboost.XGBClassifier(
+            device="cuda" if model_type == "xgboost_gpu" else "cpu",
+            tree_method="hist",
+            n_estimators=300,
+            max_depth=5,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=42,
+            n_jobs=-1,
+        )
+    elif model_type == "gradient_boosting":
+        model = GradientBoostingClassifier(random_state=42)
+    else:
+        raise ValueError(
+            f"Unknown model_type {model_type!r}. "
+            "Use gradient_boosting, hist_gradient_boosting, xgboost or xgboost_gpu."
+        )
+
     model.fit(x_train, y_train, sample_weight=sample_weight)
     return model
 
@@ -174,6 +218,7 @@ def _walk_forward_windows(row_count: int, validation_split: float, walk_forward_
 
 
 def _run_walk_forward_analysis(dataset, features, targets, model_config, risk_config):
+    model_type = getattr(model_config, "model_type", "gradient_boosting")
     np = _load_numpy()
 
     fold_summaries = []
@@ -192,7 +237,7 @@ def _run_walk_forward_analysis(dataset, features, targets, model_config, risk_co
         x_test = features.iloc[validation_end:test_end]
         y_test = targets.iloc[validation_end:test_end]
 
-        model = _fit_classifier(x_train, y_train)
+        model = _fit_classifier(x_train, y_train, model_type)
         validation_probabilities = model.predict_proba(x_validation)[:, 1]
         validation_predictions = _prediction_rows(
             dataset.iloc[train_end:validation_end],
@@ -352,7 +397,7 @@ def train_model_from_frames(
     y_validation = targets.iloc[train_end:validation_end]
     y_test = targets.iloc[validation_end:]
 
-    model = _fit_classifier(x_train, y_train)
+    model = _fit_classifier(x_train, y_train, model_config.model_type)
 
     validation_probabilities = model.predict_proba(x_validation)[:, 1]
     test_probabilities = model.predict_proba(x_test)[:, 1]

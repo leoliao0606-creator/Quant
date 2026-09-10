@@ -27,6 +27,12 @@ def parse_args():
     parser.add_argument("--connect-retries", type=int, default=3)
     parser.add_argument("--retry-delay-seconds", type=float, default=3.0)
     parser.add_argument("--client-id-step", type=int, default=1)
+    parser.add_argument(
+        "--model-type",
+        choices=["gradient_boosting", "hist_gradient_boosting", "xgboost", "xgboost_gpu"],
+        default="gradient_boosting",
+        help="hist_gradient_boosting trains ~6x faster at a small cost in signal quality.",
+    )
     parser.add_argument("--horizon-bars", type=int, default=3)
     parser.add_argument(
         "--label-mode",
@@ -153,6 +159,17 @@ def parse_args():
     )
     parser.add_argument("--risk-per-trade", type=float, default=0.01)
     parser.add_argument("--max-position-fraction", type=float, default=0.20)
+    parser.add_argument(
+        "--max-gross-exposure",
+        type=float,
+        default=1.0,
+        help=(
+            "Cap on the sum of all positions as a fraction of equity. Without "
+            "it max-position-fraction and max-active-positions multiply: 50 "
+            "percent across 10 slots is 5x leverage, which turned a set of "
+            "sub-2 percent losses into a tripped circuit breaker."
+        ),
+    )
     parser.add_argument("--max-daily-trade-count", type=int, default=12)
     parser.add_argument("--stop-loss-pct", type=float, default=0.008)
     parser.add_argument("--take-profit-pct", type=float, default=0.015)
@@ -179,6 +196,7 @@ def main() -> None:
         bar_timezone=args.bar_timezone,
     )
     model_config = ModelConfig(
+        model_type=args.model_type,
         horizon_bars=args.horizon_bars,
         label_mode=args.label_mode,
         positive_return_threshold=args.positive_return_threshold,
@@ -214,6 +232,7 @@ def main() -> None:
         position_sizing=args.position_sizing,
         risk_per_trade=args.risk_per_trade,
         max_position_fraction=args.max_position_fraction,
+        max_gross_exposure=args.max_gross_exposure,
         max_active_positions=args.max_active_positions,
         max_daily_trade_count=args.max_daily_trade_count,
         stop_loss_pct=args.stop_loss_pct,
