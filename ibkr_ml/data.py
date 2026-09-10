@@ -316,6 +316,66 @@ def _duration_to_days(duration: str) -> int:
     return max(int(value * unit_to_days[unit]), 1)
 
 
+# Minutes past midnight of the US equities open. Hourly bars are aligned to it
+# so a bar covers 09:30-10:30 rather than 09:00-10:00, which would put the
+# opening auction in a bucket that is mostly outside the session.
+SESSION_OPEN_OFFSET = "30min"
+
+
+def bar_size_to_pandas_rule(bar_size: str) -> str:
+    """Translate an IBKR bar size such as "1 hour" into a pandas resample rule."""
+    parts = str(bar_size).strip().split()
+    if len(parts) != 2:
+        raise ValueError(f"Unsupported bar size: {bar_size!r}")
+
+    value, unit = parts
+    unit = unit.lower().rstrip("s")
+    suffix = {"sec": "s", "second": "s", "min": "min", "minute": "min", "hour": "h", "day": "D"}
+    if unit not in suffix:
+        raise ValueError(f"Unsupported bar size unit: {unit!r}")
+    return f"{int(value)}{suffix[unit]}"
+
+
+def resample_frame(frame, bar_size: str, bar_timezone: str | None = None):
+    """Aggregate OHLCV bars up to a longer bar size, in US Eastern time.
+
+    Lets one download serve several timescales, which matters twice over: a
+    fresh pull of hourly bars costs another session-holding download, and
+    experiments across timescales are only comparable when they are built from
+    the same underlying prices.
+
+    Grouping happens on the US Eastern wall clock, not on whatever zone the
+    bars arrived in. It has to: a daily bucket in UTC starts at 20:00 the
+    previous Eastern evening and would split each session across two rows.
+
+    Intraday buckets are offset to the 09:30 open, so an hourly bar covers
+    09:30-10:30 rather than 09:00-10:00 - the latter would file the opening
+    auction under a bucket that is mostly outside the session.
+
+    Only aggregation upward is possible. Buckets with no trading - a holiday, a
+    half day, the gap around a halt - come out empty and are dropped rather
+    than forward-filled: inventing a bar that never traded would hand the model
+    a price nobody could have acted on.
+    """
+    from .features import to_eastern_naive
+
+    rule = bar_size_to_pandas_rule(bar_size)
+    eastern = to_eastern_naive(frame["timestamp"], bar_timezone)
+    indexed = frame.drop(columns=["timestamp"]).set_index(eastern).sort_index()
+    indexed.index.name = "timestamp"
+
+    intraday = rule.endswith(("s", "min", "h"))
+    aggregated = indexed.resample(
+        rule,
+        label="left",
+        closed="left",
+        offset=SESSION_OPEN_OFFSET if intraday else None,
+    ).agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+
+    aggregated = aggregated.dropna(subset=["open", "high", "low", "close"]).reset_index()
+    return aggregated[["timestamp", "open", "high", "low", "close", "volume"]]
+
+
 def _is_intraday_bar_size(bar_size: str) -> bool:
     lowered = bar_size.lower()
     return "sec" in lowered or "min" in lowered or "hour" in lowered

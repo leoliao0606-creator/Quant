@@ -353,17 +353,48 @@ def simulate_probability_strategy(
     }
 
 
+# A threshold that almost never fires is not a strategy, and its Sharpe is not
+# evidence. Staying flat cannot lose money, so an entry bar set high enough to
+# suppress trading scores well on every risk-adjusted measure while doing
+# nothing - a model that learned to avoid the question rather than answer it.
+# Seen live: a configuration picked at entry 0.69 traded 14 times in 54 days
+# with 0.1% exposure, and its Sharpe of 0.53 went on to clear the deployment
+# gate.
+MINIMUM_TRADE_COUNT = 20
+MINIMUM_EXPOSURE = 0.05
+
+
+def _threshold_is_usable(result, min_trade_count: int, min_exposure: float) -> str | None:
+    """Reason this threshold cannot be trusted, or None when it can."""
+    if result["trade_count"] < min_trade_count:
+        return f"only {result['trade_count']} trades"
+    if result["exposure"] < min_exposure:
+        return f"exposure {result['exposure']:.1%} below {min_exposure:.0%}"
+    return None
+
+
 def select_probability_thresholds(
     validation_rows,
     transaction_cost_bps: float,
     threshold_hysteresis: float,
     max_active_positions: int | None,
     risk_config=None,
+    min_trade_count: int = MINIMUM_TRADE_COUNT,
+    min_exposure: float = MINIMUM_EXPOSURE,
 ):
+    """Pick entry/exit probabilities on the validation split.
+
+    Candidates that barely trade are rejected outright rather than ranked,
+    because their scores measure inactivity rather than skill. When nothing
+    qualifies, the result carries qualified=False: that a model has no
+    threshold producing real activity is a finding in itself, and it should not
+    be hidden behind a fallback that looks like a normal selection.
+    """
     np = _load_numpy()
 
     candidate_entries = np.arange(0.45, 0.71, 0.02)
     best_choice = None
+    rejections: list[str] = []
 
     for entry_probability in candidate_entries:
         exit_probability = max(entry_probability - threshold_hysteresis, 0.05)
@@ -375,7 +406,10 @@ def select_probability_thresholds(
             max_active_positions=max_active_positions,
             risk_config=risk_config,
         )
-        if result["trade_count"] < 4:
+
+        rejection = _threshold_is_usable(result, min_trade_count, min_exposure)
+        if rejection is not None:
+            rejections.append(f"{float(entry_probability):.2f}: {rejection}")
             continue
 
         score = (result["sharpe"], result["total_return"], -abs(result["exposure"] - 0.35))
@@ -385,12 +419,17 @@ def select_probability_thresholds(
                 "entry_probability": float(entry_probability),
                 "exit_probability": float(exit_probability),
                 "validation_backtest": result,
+                "qualified": True,
+                "selection_note": "",
             }
 
     if best_choice is not None:
         return best_choice
 
-    fallback_entry = 0.55
+    # Nothing traded enough to be judged. Fall back to the most active
+    # threshold rather than a fixed one, so the reported numbers describe the
+    # closest thing to a real strategy this model can produce.
+    fallback_entry = float(candidate_entries[0])
     fallback_exit = max(fallback_entry - threshold_hysteresis, 0.05)
     result = simulate_probability_strategy(
         prediction_rows=validation_rows,
@@ -400,9 +439,17 @@ def select_probability_thresholds(
         max_active_positions=max_active_positions,
         risk_config=risk_config,
     )
+    note = (
+        f"no threshold reached {min_trade_count} trades and {min_exposure:.0%} exposure; "
+        f"reporting the most active candidate ({fallback_entry:.2f}). "
+        + "; ".join(rejections[:3])
+    )
+    print(f"warning: {note}")
     return {
         "score": (result["sharpe"], result["total_return"], -abs(result["exposure"] - 0.35)),
         "entry_probability": fallback_entry,
         "exit_probability": fallback_exit,
         "validation_backtest": result,
+        "qualified": False,
+        "selection_note": note,
     }

@@ -113,6 +113,28 @@ class IBKRPaperTrader:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._validate_model_bundle()
         self._warn_on_timezone_mismatch()
+        self._check_resampling_matches()
+
+    def _check_resampling_matches(self) -> None:
+        """Refuse to score a model trained on bars this loop is not building.
+
+        A model fitted on hourly bars reads a completely different feature
+        distribution from five-minute bars. Nothing downstream would notice:
+        the columns line up, the numbers are plausible, and the predictions are
+        meaningless.
+        """
+        trained_on = self.bundle.get("resample_to")
+        if not trained_on:
+            return
+
+        configured = getattr(self.market_config, "resample_to", None)
+        if configured != trained_on:
+            raise RuntimeError(
+                f"This model was trained on bars resampled to {trained_on!r}, but "
+                f"the live loop is configured for {configured!r}. Pass "
+                f"--resample-to {trained_on!r} to paper_trade.py, or retrain "
+                "without resampling."
+            )
 
     def _warn_on_timezone_mismatch(self) -> None:
         """Report when the model was trained on bars read in another timezone.
@@ -172,6 +194,17 @@ class IBKRPaperTrader:
         worst_max_drawdown = walk_forward.get("worst_max_drawdown")
         if worst_max_drawdown is None or worst_max_drawdown < -0.10:
             issues.append(f"worst_max_drawdown={worst_max_drawdown}")
+
+        # A model whose best threshold barely trades has no measured edge, only
+        # the absence of losses that come from staying flat. Its Sharpe would
+        # otherwise sail through every check above.
+        if not self.bundle.get("threshold_qualified", True):
+            note = self.bundle.get("threshold_note") or "threshold trades too rarely to judge"
+            issues.append(f"threshold_not_qualified ({note})")
+
+        qualified_folds = walk_forward.get("qualified_folds")
+        if qualified_folds is not None and fold_count and qualified_folds < fold_count:
+            issues.append(f"walk_forward_qualified_folds={qualified_folds}/{fold_count}")
 
         if issues:
             raise RuntimeError(

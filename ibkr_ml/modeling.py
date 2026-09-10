@@ -4,7 +4,11 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Mapping
 
-from .backtest import select_probability_thresholds, simulate_probability_strategy
+from .backtest import (
+    _threshold_is_usable,
+    select_probability_thresholds,
+    simulate_probability_strategy,
+)
 from .config import RiskConfig
 from .features import (
     build_labeled_rows,
@@ -228,6 +232,7 @@ def _run_walk_forward_analysis(dataset, features, targets, model_config, risk_co
                 "test_rows": int(len(x_test)),
                 "entry_probability": float(threshold_selection["entry_probability"]),
                 "exit_probability": float(threshold_selection["exit_probability"]),
+                "threshold_qualified": bool(threshold_selection.get("qualified", True)),
                 "auc": test_metrics["auc"],
                 "precision": test_metrics["precision"],
                 "recall": test_metrics["recall"],
@@ -245,6 +250,7 @@ def _run_walk_forward_analysis(dataset, features, targets, model_config, risk_co
             "summary": {
                 "fold_count": 0,
                 "profitable_folds": 0,
+                "qualified_folds": 0,
                 "mean_auc": None,
                 "mean_f1": None,
                 "mean_total_return": None,
@@ -258,6 +264,7 @@ def _run_walk_forward_analysis(dataset, features, targets, model_config, risk_co
     summary = {
         "fold_count": len(fold_summaries),
         "profitable_folds": int(sum(row["total_return"] > 0.0 for row in fold_summaries)),
+        "qualified_folds": int(sum(row.get("threshold_qualified", True) for row in fold_summaries)),
         "mean_auc": float(np.mean(auc_values)) if auc_values else None,
         "mean_f1": float(np.mean([row["f1"] for row in fold_summaries])),
         "mean_total_return": float(np.mean([row["total_return"] for row in fold_summaries])),
@@ -277,6 +284,7 @@ def train_model_from_frames(
     bar_timezone: str | None = None,
     reference_frames=None,
     reference_symbols=None,
+    resample_to: str | None = None,
 ):
     """Train, evaluate and persist the model bundle.
 
@@ -364,6 +372,8 @@ def train_model_from_frames(
         model_config.entry_probability = threshold_selection["entry_probability"]
         model_config.exit_probability = threshold_selection["exit_probability"]
         validation_backtest = threshold_selection["validation_backtest"]
+        threshold_qualified = bool(threshold_selection.get("qualified", True))
+        threshold_note = str(threshold_selection.get("selection_note", ""))
     else:
         validation_backtest = simulate_probability_strategy(
             prediction_rows=validation_predictions,
@@ -373,6 +383,13 @@ def train_model_from_frames(
             max_active_positions=model_config.max_active_positions,
             risk_config=risk_config,
         )
+        # A hand-picked threshold gets the same activity check as a searched
+        # one; supplying it by hand does not make an inactive strategy valid.
+        rejection = _threshold_is_usable(validation_backtest, 20, 0.05)
+        threshold_qualified = rejection is None
+        threshold_note = "" if rejection is None else f"supplied threshold: {rejection}"
+        if rejection is not None:
+            print(f"warning: {threshold_note}")
 
     test_predictions = _prediction_rows(
         dataset.iloc[validation_end:],
@@ -413,6 +430,9 @@ def train_model_from_frames(
         "model_config": asdict(model_config),
         "risk_config": asdict(risk_config),
         "bar_timezone": bar_timezone,
+        "resample_to": resample_to,
+        "threshold_qualified": threshold_qualified,
+        "threshold_note": threshold_note,
         "library_versions": _library_versions(),
         "reference_symbols": dict(reference_symbols or {}),
         "base_feature_columns": list(active_feature_columns),
@@ -509,6 +529,7 @@ def predict_probability(
     bar_timezone: str | None = None,
     reference_frames=None,
     reference_symbols=None,
+    resample_to: str | None = None,
 ):
     """Score the newest usable bar for one symbol.
 

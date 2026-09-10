@@ -584,3 +584,54 @@ class TestReferenceFrames:
         trader._fetch_reference_frames(FakeIB(), et("2026-01-05 11:00"))
         # No point downloading the rest once the feature set is already incomplete.
         assert attempted == ["SPY"]
+
+
+class TestThresholdQualityGate:
+    """A model whose best threshold barely trades must not reach the account."""
+
+    def test_an_unqualified_threshold_is_refused(self, make_trader):
+        from conftest import passing_bundle
+
+        bundle = passing_bundle()
+        bundle["threshold_qualified"] = False
+        bundle["threshold_note"] = "only 14 trades"
+
+        with pytest.raises(RuntimeError, match="threshold_not_qualified"):
+            make_trader(bundle=bundle)
+
+    def test_the_note_explains_why(self, make_trader):
+        from conftest import passing_bundle
+
+        bundle = passing_bundle()
+        bundle["threshold_qualified"] = False
+        bundle["threshold_note"] = "exposure 0.1% below 5%"
+
+        with pytest.raises(RuntimeError, match="exposure 0.1%"):
+            make_trader(bundle=bundle)
+
+    def test_walk_forward_folds_that_could_not_be_judged_are_refused(self, make_trader):
+        from conftest import passing_bundle
+
+        bundle = passing_bundle()
+        bundle["walk_forward_summary"]["qualified_folds"] = 1  # of 3
+
+        with pytest.raises(RuntimeError, match="walk_forward_qualified_folds=1/3"):
+            make_trader(bundle=bundle)
+
+    def test_a_fully_qualified_model_still_passes(self, make_trader):
+        from conftest import passing_bundle
+
+        bundle = passing_bundle()
+        bundle["threshold_qualified"] = True
+        bundle["walk_forward_summary"]["qualified_folds"] = 3
+
+        assert make_trader(bundle=bundle) is not None
+
+    def test_older_bundles_without_the_field_are_not_penalised(self, make_trader):
+        from conftest import passing_bundle
+
+        bundle = passing_bundle()
+        bundle.pop("threshold_qualified", None)
+        bundle["walk_forward_summary"].pop("qualified_folds", None)
+
+        assert make_trader(bundle=bundle) is not None

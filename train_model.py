@@ -11,7 +11,7 @@ from ibkr_ml.config import (
     RiskConfig,
 )
 from ibkr_ml.cache import fetch_frames
-from ibkr_ml.data import connect_ib, fetch_historical_frame
+from ibkr_ml.data import connect_ib, fetch_historical_frame, resample_frame
 from ibkr_ml.modeling import train_model_from_frames
 
 
@@ -85,6 +85,17 @@ def parse_args():
             "session at all, and two experiments that read the same cache "
             "are comparable because they replay identical input. Pass an "
             "empty string to disable caching."
+        ),
+    )
+    parser.add_argument(
+        "--resample-to",
+        default=None,
+        help=(
+            "Aggregate the fetched bars up to this bar size before training, "
+            "e.g. '1 hour'. One cached download then serves several "
+            "timescales, and experiments across timescales stay comparable "
+            "because they are built from the same underlying prices. "
+            "paper_trade.py must be given the same value."
         ),
     )
     parser.add_argument(
@@ -209,6 +220,21 @@ def main() -> None:
         fetch_one=fetch_one,
     )
 
+    effective_bar_timezone = args.bar_timezone
+    if args.resample_to:
+        frames = {
+            symbol: resample_frame(frame, args.resample_to, args.bar_timezone)
+            for symbol, frame in frames.items()
+        }
+        # resample_frame returns US Eastern wall-clock timestamps, so declaring
+        # a source zone again downstream would shift them a second time.
+        effective_bar_timezone = None
+        example = next(iter(frames.values()))
+        print(
+            f"Resampled {market_config.bar_size} bars to {args.resample_to}: "
+            f"{len(example)} bars per symbol"
+        )
+
     reference_frames = {key: frames[symbol] for key, symbol in reference_symbols.items()}
     training_frames = {symbol: frames[symbol] for symbol in market_config.symbols}
     if reference_symbols:
@@ -220,9 +246,10 @@ def main() -> None:
         training_frames,
         model_config,
         risk_config,
-        bar_timezone=args.bar_timezone,
+        bar_timezone=effective_bar_timezone,
         reference_frames=reference_frames or None,
         reference_symbols=reference_symbols,
+        resample_to=args.resample_to,
     )
     print(f"Saved model bundle to {model_config.model_path}")
     print("Selected thresholds:")

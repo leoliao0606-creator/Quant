@@ -195,3 +195,83 @@ class TestResultShape:
         ):
             assert key in result
         assert len(result["equity_curve"]) == 3
+
+
+class TestThresholdActivityFloor:
+    """A threshold that almost never fires is not a strategy.
+
+    Staying flat cannot lose money, so an entry bar set high enough to suppress
+    trading scores well on every risk-adjusted measure while doing nothing.
+    Seen live: entry 0.69 traded 14 times in 54 days at 0.1% exposure, and its
+    Sharpe of 0.53 cleared the deployment gate.
+    """
+
+    def rows_with_probabilities(self, probabilities, symbols=("AAA", "BBB"), n=300):
+        """Prices that drift up, with probabilities drawn from a given range."""
+        import numpy as np
+
+        rng = np.random.default_rng(3)
+        low, high = probabilities
+        rows = []
+        for symbol in symbols:
+            price = 100.0
+            for index in range(n):
+                price *= 1.0 + rng.normal(0.0002, 0.001)
+                rows.append(
+                    {
+                        "timestamp": pd.Timestamp("2026-01-05 09:30")
+                        + pd.Timedelta(minutes=5 * index),
+                        "symbol": symbol,
+                        "close": price,
+                        "probability_up": float(rng.uniform(low, high)),
+                    }
+                )
+        return pd.DataFrame(rows)
+
+    def select(self, rows, **overrides):
+        from ibkr_ml.backtest import select_probability_thresholds
+
+        kwargs = {
+            "validation_rows": rows,
+            "transaction_cost_bps": 1.0,
+            "threshold_hysteresis": 0.06,
+            "max_active_positions": 2,
+        }
+        kwargs.update(overrides)
+        return select_probability_thresholds(**kwargs)
+
+    def test_an_active_strategy_is_selected_and_marked_qualified(self):
+        selection = self.select(self.rows_with_probabilities((0.40, 0.80)))
+        assert selection["qualified"] is True
+        assert selection["validation_backtest"]["trade_count"] >= 20
+        assert selection["validation_backtest"]["exposure"] >= 0.05
+
+    def test_probabilities_that_never_clear_the_bar_are_not_qualified(self, capsys):
+        # Nothing reaches even the lowest candidate entry of 0.45.
+        selection = self.select(self.rows_with_probabilities((0.20, 0.42)))
+        assert selection["qualified"] is False
+        assert "no threshold reached" in selection["selection_note"]
+        assert "no threshold reached" in capsys.readouterr().out
+
+    def test_an_unqualified_selection_still_reports_usable_numbers(self):
+        selection = self.select(self.rows_with_probabilities((0.20, 0.42)))
+        # The caller needs an entry/exit pair and a backtest either way; what
+        # changes is that the result says not to trust them.
+        assert 0.0 < selection["entry_probability"] < 1.0
+        assert selection["validation_backtest"] is not None
+
+    def test_the_floor_can_be_raised(self):
+        rows = self.rows_with_probabilities((0.40, 0.80))
+        assert self.select(rows, min_trade_count=1, min_exposure=0.0)["qualified"] is True
+        assert self.select(rows, min_trade_count=100000)["qualified"] is False
+
+    def test_exposure_and_trade_count_are_checked_separately(self):
+        from ibkr_ml.backtest import _threshold_is_usable
+
+        busy_but_flat = {"trade_count": 500, "exposure": 0.001}
+        held_but_idle = {"trade_count": 3, "exposure": 0.90}
+        healthy = {"trade_count": 100, "exposure": 0.30}
+
+        assert "exposure" in _threshold_is_usable(busy_but_flat, 20, 0.05)
+        assert "trades" in _threshold_is_usable(held_but_idle, 20, 0.05)
+        assert _threshold_is_usable(healthy, 20, 0.05) is None
