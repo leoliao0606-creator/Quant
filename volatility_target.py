@@ -28,6 +28,13 @@ measured on return above cash at each period's own bill rate:
                      and 6 of 13 over 2017-2026 (median -0.007)
     annual return    about -0.3% over 2006-2016, about -2.0% over 2017-2026
 
+Confirmed a second time, on a different kind of book. The thirteen funds
+above are diversified products; the same rule applied to a 253-stock
+portfolio over 2006-2026 takes its drawdown from -49.8% to -31.9% and its
+Sharpe from 0.59 to 0.63, and over 2017-2026 alone from -34.1% to -17.4%.
+Same shape: drawdown much better, Sharpe better early and flat late, return
+lower. See `cross_section_audit.py --overlay`.
+
 So: a drawdown tool, not a Sharpe tool. The risk-adjusted gain appears in
 the window containing a prolonged bear market and vanishes in the one
 without, the same shape trend timing has, but the cost of carrying it is

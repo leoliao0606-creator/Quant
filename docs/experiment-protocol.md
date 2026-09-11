@@ -919,6 +919,105 @@ capitalisation-weighted index, which is the mega-cap concentration of the
 last decade seen from the other side. For the stated goal, SPY is a better
 starting point than any equal-weight stock basket assembled here.
 
+## RETRACTED: the momentum result above was look-ahead bias (2026-09-11)
+
+Everything in the section that follows is withdrawn. The alphas in it were
+produced by a backtest that let the signal read a price the account could
+not have seen, and the controls that appeared to confirm them could not
+detect that, because they shared the same fault. Kept here rather than
+deleted: how the error survived four separate checks is the more useful
+record.
+
+### The fault
+
+The weights started earning on the day the signal was read. `xsec_wide.py`
+computed the signal on day D, set that day's weights from it, and collected
+day D's return. For a signal containing day D's closing price that is
+look-ahead bias - choosing the names using a price that had not printed
+when the trade was supposed to happen. The headline signal, momentum 12-0,
+is `closes / closes.shift(252)`, which contains it.
+
+### Size of the error
+
+`cross_section_audit.py` scores every signal three ways: A as-run, B with
+the signal shifted a day so it uses only what had printed by the previous
+close, C additionally letting the holdings drift with prices between
+rebalances instead of being reset to equal weight daily at no cost.
+
+Alpha against the equal-weight basket of the same 253 names:
+
+| signal | contains day D's close | 2017-2026 A / B / C | 2006-2016 A / B / C |
+|---|---|---|---|
+| momentum 12-1 | no | +2.95% / +1.71% / +1.33% | -0.95% / -1.57% / -1.93% |
+| momentum 12-0 | yes | **+4.87%** / +1.94% / +1.64% | **+1.14%** / -1.38% / -1.72% |
+| momentum 6-0 | yes | +6.47% / +2.81% / +2.58% | +4.01% / +1.26% / +0.92% |
+| price / MA200 | yes | +5.50% / +2.37% / +2.18% | +1.96% / -0.49% / -0.86% |
+| short reversal | yes | -6.80% / -0.90% / -0.93% | -9.45% / -4.71% / -5.43% |
+| low volatility | mildly | -1.26% / -1.64% / -1.75% | -0.92% / -1.00% / -1.12% |
+
+The four signals containing day D's close lose about three points a year
+when the day is taken away. Momentum 12-1, which does not contain it, loses
+1.24 points, well under half a standard error of its own alpha, which is
+noise. Short reversal moves the other way and gains 5.9 points, which is
+what look-ahead predicts for a signal that buys whatever fell today and
+then collects today's fall. The direction is right for every row, so this
+is the bias and not a coincidence.
+
+Corrected, momentum 12-0 earns -1.72% a year over 2006-2016 and +1.64% over
+2017-2026, t below 1 in both. **Cross-sectional momentum does not work on
+this universe.**
+
+### The permutation test certified the bug
+
+The original run reported p = 0.0099 from 100 permutations. Two faults:
+
+1. The control drew from every column, including names that had not listed
+   yet, whose price is NaN. Those slots earned nothing, so the control was
+   never fully invested and was too easy to beat. Drawing only from names
+   trading that day lifts the control's median Sharpe to 0.65 with a range
+   of [0.51, 0.78] - against the real signal's corrected 0.67. p = 0.36.
+2. More seriously, the permutation replaced the *selection* while keeping
+   the same timing machinery. The look-ahead lived in the machinery, so it
+   was present in the real arm and absent from the control. The test was
+   measuring the bias.
+
+This is the general lesson and it applies to every control in this file: a
+permutation, a bootstrap or a cost sweep built on one backtest pipeline
+cannot see a fault in that pipeline. They all agreed because they were all
+asking the same question of the same wrong object. What found it was
+recomputing the result a different way, not testing the result harder.
+
+### What survives
+
+The volatility overlay does, and on new data. With momentum's selection
+reduced to noise, the pair over 2006-2026 on 253 names reads:
+
+| arm | annual | volatility | Sharpe | drawdown |
+|---|---|---|---|---|
+| equal-weight basket | +12.44% | 20.69% | 0.60 | -51.31% |
+| momentum selection | +12.21% | 20.64% | 0.59 | -49.82% |
+| momentum + volatility target | +10.26% | 14.86% | 0.63 | **-31.90%** |
+
+The selection arm is worth nothing - it matches the basket it is drawn
+from. The overlay still removes 18 points of drawdown, and over 2017-2026
+alone it takes -34.08% to -17.35%. That reproduces on a 253-stock portfolio
+the shape established on thirteen index funds: drawdown much better, Sharpe
+better early and flat late, return lower. It is an independent confirmation
+on a different kind of book, and it is the only thing in this project that
+has now been confirmed twice.
+
+Reproduce with `python cross_section_audit.py --start 2017-01-01` and
+`python cross_section_audit.py --overlay`.
+
+### Also withdrawn
+
+The survivorship story below - the narrow universe's +5.97% against the
+wide universe's +1.10% - used the same day-zero timing in `xsec.py`
+(`usable.iloc[i]` selects and earns on the same day), so the +5.97% is
+inflated by roughly the same three points. The measured gap between the
+narrow and wide baskets, 1.61% and 6.92% a year, does not depend on any
+signal and stands. The four-cell story built on top of it does not.
+
 ## Momentum, retested on a universe that contains losers (2026-09-11)
 
 Cross-sectional momentum was rejected earlier on the 66-symbol universe:
