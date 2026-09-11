@@ -663,3 +663,54 @@ The same table is the first positive result in this project to hold across
 two separate periods with the parameter fixed in the first: 20-day
 targeting improves Sharpe and cuts the worst drawdown on both instruments,
 over ten years that include the 2020 crash and the 2022 bear market.
+
+### What beating the index actually comes to (2026-09-11)
+
+Targeting raises Sharpe and lowers both return and volatility, so the
+comparison has to be made at one level of risk: lever the targeted book
+until its volatility matches the index, and charge the borrowing. The
+leverage factor is fixed on 2006-2016 and applied unchanged afterwards.
+
+Idle cash earns 4.3% and borrowed cash costs 6.0%, IBKR's retail margin
+rate. Charging the bill rate both ways flatters every levered variant by
+the spread times the borrowed fraction, which at 1.33x is about half the
+measured advantage.
+
+Unlevered, all four instrument-period pairs move the same way:
+
+| | Sharpe | max drawdown | annualised |
+|---|---|---|---|
+| SPY 2006-2016 | 0.35 → **0.49** | -56.5% → **-40.9%** | +5.26% → **+6.60%** |
+| SPY 2017-2026 | 0.78 → **0.88** | -34.1% → **-21.2%** | +13.38% → +12.15% |
+| QQQ 2006-2016 | 0.60 → **0.72** | -53.5% → **-39.4%** | +11.11% → **+11.58%** |
+| QQQ 2017-2026 | 0.92 → **1.01** | -35.6% → **-30.0%** | +20.23% → +18.68% |
+
+Levered to matched volatility with financing paid, the return advantage
+mostly disappears: SPY 2017-2026 gives +13.81% against +13.38% at
+identical Sharpe, QQQ +21.49% against +20.23%. The drawdown advantage
+survives on SPY and does not on QQQ.
+
+Nine equal-weighted sector ETFs, the only diversification available
+without bond data, are worse than SPY in both periods before and after
+targeting. Sector spreading adds nothing here.
+
+One thing that came out of getting the leverage test wrong first: the 1.0
+cap is doing more work than the targeting. Removing it so the rule can
+borrow during calm stretches turns SPY's selection-period Sharpe from 0.47
+into 0.27. The useful rule is "hold less when volatility is high", not
+"size to a constant volatility".
+
+### The answer to the original question
+
+Beat SGOV: yes, with room. SPY volatility-targeted returned +12.15% over
+2017-2026 at a worst drawdown of -21.2%, against SGOV's roughly 4.3%.
+
+Beat the S&P 500: on risk yes, on return no. After realistic financing the
+levered version is a wash - +0.43 points a year at identical Sharpe. The
+real gain is the unlevered one: about 1.2 points a year of return given up
+for a drawdown a third smaller.
+
+That is not alpha. It is a better-shaped way to hold the same risk, it is
+the only result here whose parameter was fixed in one period and confirmed
+in another, and it is free of the survivorship problem that contaminates
+every result computed on the 66-symbol basket.
