@@ -466,3 +466,62 @@ honest options are: accept equity risk at a chosen size with volatility
 targeting for drawdown control and no model at all; or find information that
 is not in the price series, which is not obtainable from the IBKR bar feed
 this project uses.
+
+## Post-earnings drift: tested and rejected (2026-09-11)
+
+Price and volume had failed twice at predicting direction, so the next
+attempt changed the question rather than the model: after a company reports
+and the market reacts strongly upward, does the stock keep outperforming?
+Both inputs are recoverable from the bars - an earnings day is a large move
+on heavy volume repeating quarterly, and the market's reaction on the day is
+the surprise.
+
+On the tuning window it looked like the best result this project had
+produced. +20.21% annualised at Sharpe 0.89 against the same basket at the
+same 72.9% exposure returning +9.38% at Sharpe 0.65; beta 0.964, so not a
+leverage tilt; +10.33% annualised alpha at t = 2.18; a permutation keeping
+the entry days and randomising the symbols beaten 200 times out of 200; 19
+of 21 rolling two-year windows positive; a cluster bootstrap over symbols
+keeping alpha positive in 500 of 500 draws.
+
+It does not survive.
+
+### What killed it
+
+The detector was improved using an outside fact rather than a sweep: US
+companies almost all report before the open or after the close, so a report
+reaches the tape as an overnight gap, not as intraday range. Detectors were
+then judged on how well they recover the real reporting calendar - the
+third to sixth week after each quarter ends, which covers 34.6% of trading
+days - and never on what they earned.
+
+| detector | events/symbol-year | in reporting season | vs random |
+|---|---|---|---|
+| intraday move > 3.0x, volume > 1.8x | 2.65 | 46.0% | 1.33x (z=10.1) |
+| overnight gap > 3.0x, volume > 1.8x | 2.60 | **51.8%** | **1.50x (z=15.2)** |
+| overnight gap > 2.0x, volume > 1.8x | 2.89 | 48.6% | 1.40x (z=13.0) |
+
+The gap detector finds earnings better at the same event count. And the
+alpha runs the other way:
+
+| signal | threshold | events/year | alpha | t |
+|---|---|---|---|---|
+| overnight gap | 3.0 / 1.8 | 2.60 | +2.16% | 0.53 |
+| overnight gap | 2.0 / 1.5 | 3.48 | +0.10% | 0.02 |
+| intraday move | 3.0 / 1.8 | 2.65 | **+10.33%** | **2.18** |
+| intraday move | 2.0 / 1.5 | 3.73 | +4.26% | 0.84 |
+
+The better the detector identifies actual earnings, the less alpha there
+is. Post-earnings drift predicts the opposite, so whatever the +10.33% was,
+it was not that.
+
+Three facts together settle it. One cell of a 2x2 reaches t = 2.18 while
+the other three sit at or below 0.84, and Bonferroni over just those four
+puts it at p = 0.12 - before counting the move thresholds, volume
+thresholds, rank floors and holding periods swept earlier. The
+theoretically motivated detector removes it. And on 2017-2019, scored from
+one continuous event history so the rank floor stays calibrated, alpha is
++4.65% at t = 0.76 with permutation p = 0.10 and 0.14.
+
+A false positive produced by testing many configurations, found by asking
+what the signal was supposed to be and then checking whether it was that.

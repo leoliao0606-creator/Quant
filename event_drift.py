@@ -44,8 +44,11 @@ import argparse
 from pathlib import Path
 
 
+FIELDS = ("open", "close", "volume")
+
+
 def load_panel(symbols, cache_dir, duration, bar_size, start, end, minimum_rows=250):
-    """Close and volume on one shared date index.
+    """Open, close and volume on one shared date index.
 
     Both come from the same loader deliberately. The daily cache stores a
     bare date with no timezone; reading it with utc=True treats that as UTC
@@ -58,7 +61,7 @@ def load_panel(symbols, cache_dir, duration, bar_size, start, end, minimum_rows=
     from ibkr_ml.cache import load_cached_frame
     from ibkr_ml.features import to_eastern_naive
 
-    closes, volumes = {}, {}
+    columns = {field: {} for field in FIELDS}
     for symbol in symbols:
         frame, _ = load_cached_frame(cache_dir, symbol, duration, bar_size, True)
         if frame is None:
@@ -68,21 +71,38 @@ def load_panel(symbols, cache_dir, duration, bar_size, start, end, minimum_rows=
         if keep.sum() < minimum_rows:
             continue
         index = stamps[keep].to_numpy()
-        closes[symbol] = pd.Series(frame.loc[keep, "close"].to_numpy(float), index=index)
-        volumes[symbol] = pd.Series(frame.loc[keep, "volume"].to_numpy(float), index=index)
-    if not closes:
+        for field in FIELDS:
+            columns[field][symbol] = pd.Series(
+                frame.loc[keep, field].to_numpy(float), index=index)
+    if not columns["close"]:
         raise SystemExit("缓存里没有这段日期的日线数据")
-    close_frame = pd.DataFrame(closes).sort_index()
-    return close_frame, pd.DataFrame(volumes).sort_index().reindex(close_frame.index)
+    closes = pd.DataFrame(columns["close"]).sort_index()
+    return {field: pd.DataFrame(columns[field]).sort_index().reindex(closes.index)
+            for field in FIELDS}
 
 
-def find_events(closes, volumes, returns, basket, move_cut, volume_cut, spacing):
-    """Large moves on heavy volume, thinned to at most one per quarter."""
+def find_events(panel, returns, basket, move_cut, volume_cut, spacing, use_gap=True):
+    """Earnings-like days, thinned to at most one per spacing window.
+
+    use_gap measures the overnight move, open against the previous close,
+    rather than the whole day's range. Almost every US company reports
+    before the open or after the close, so a report reaches the tape as a
+    gap; an intraday threshold instead catches volatile sessions that were
+    not announcements. Judged on how well each recovers a quarterly
+    calendar - not on what it earns, which would be fitting the instrument
+    to the answer - the gap version finds 1.12 events per symbol-year
+    spaced 55 to 72 days apart against 0.75 for the intraday version.
+    """
     import pandas as pd
 
-    move_ratio = returns.abs() / returns.abs().rolling(60).median()
+    closes, volumes = panel["close"], panel["volume"]
+    if use_gap:
+        signal = (panel["open"] / closes.shift(1) - 1.0).abs()
+    else:
+        signal = returns.abs()
+    signal_ratio = signal / signal.rolling(60).median()
     volume_ratio = volumes / volumes.rolling(60).median()
-    candidate = (move_ratio > move_cut) & (volume_ratio > volume_cut)
+    candidate = (signal_ratio > move_cut) & (volume_ratio > volume_cut)
 
     rows = []
     for symbol in closes.columns:
@@ -189,10 +209,16 @@ def main() -> None:
     parser.add_argument("--bar-size", default="1 day")
     parser.add_argument("--start", default="2006-09-18")
     parser.add_argument("--end", default="2017-01-01")
-    parser.add_argument("--move-threshold", type=float, default=3.0,
-                        help="Multiples of the trailing 60-day median absolute return.")
-    parser.add_argument("--volume-threshold", type=float, default=1.8,
+    parser.add_argument("--move-threshold", type=float, default=2.0,
+                        help="Multiples of the trailing 60-day median absolute "
+                             "overnight gap, or of the median daily return "
+                             "under --intraday-move.")
+    parser.add_argument("--volume-threshold", type=float, default=1.5,
                         help="Multiples of the trailing 60-day median volume.")
+    parser.add_argument("--intraday-move", action="store_true",
+                        help="Detect on the whole day's return instead of the "
+                             "overnight gap. Recovers the quarterly calendar "
+                             "less well; kept to reproduce the first results.")
     parser.add_argument("--spacing", type=int, default=40,
                         help="Minimum trading days between two events on one symbol.")
     parser.add_argument("--rank-floor", type=float, default=0.80,
@@ -229,12 +255,14 @@ def main() -> None:
     symbols = [s for s in symbols if s not in set(args.exclude)]
 
     start, end = pd.Timestamp(args.start), pd.Timestamp(args.end)
-    closes, volumes = load_panel(symbols, cache_dir, args.duration, args.bar_size, start, end)
+    panel = load_panel(symbols, cache_dir, args.duration, args.bar_size, start, end)
+    closes = panel["close"]
     returns = closes.pct_change(fill_method=None)
     basket = returns.mean(axis=1)
 
-    events = find_events(closes, volumes, returns, basket,
-                         args.move_threshold, args.volume_threshold, args.spacing)
+    events = find_events(panel, returns, basket, args.move_threshold,
+                         args.volume_threshold, args.spacing,
+                         use_gap=not args.intraday_move)
     events = add_trailing_rank(events, args.warmup_events)
     qualified = events.dropna(subset=["rank"]).query("rank >= @args.rank_floor")
     score_from = pd.Timestamp(args.score_from) if args.score_from else None
