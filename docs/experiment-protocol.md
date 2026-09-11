@@ -67,3 +67,59 @@ is how a search turns into curve fitting.
 Every run appends to `experiments/results.jsonl`: configuration, all metrics,
 pass/fail against each criterion, and a timestamp. Failures are recorded with
 the same detail as successes.
+
+## Hold-out result, run once on 2026-09-10
+
+Model `artifacts/exp_Q_gpu.joblib`, unchanged. Period 2023-02-07 to
+2025-04-02: 540 trading days, 2,888,805 rows, 69 symbols, never read by any
+earlier experiment.
+
+| | pre-registered | measured | |
+|---|---|---|---|
+| annualised return | > 5% | **+1.07%** | fail |
+| Sharpe | >= 1.0 | **0.31** per-bar, 0.30 daily | fail |
+| max drawdown | > -15% | -3.98% | pass |
+| trades | >= 100 | 1257 | pass |
+
+AUC 0.6257. Total return +2.29% over 2.14 years. Mean gross exposure 1.06%.
+Sign-flip test p = 0.1877, bootstrap 95% interval on dollars per trade
+[-2.11, +5.81] - the sample cannot establish that the return is not zero.
+Against the stated goal of beating SGOV at roughly 4-5%, this is a loss.
+
+The tuning period's walk-forward reported +7.40% annualised and Sharpe 1.69
+over 54-day folds. The gap between that and +1.07% over 540 days is what
+fitting to a short window buys.
+
+### Why, in one number
+
+Hold-out deciles by predicted probability show the ranking is real: the
+bottom tenth returns +0.0038% over the next 12 bars and the top tenth
++0.0532%, correlation +0.656 across deciles, on rows the model never saw.
+
+The edge is simply smaller than the cost of taking it:
+
+| slice | gross return | net of 10 bps round trip |
+|---|---|---|
+| top 10% | +0.0532% | -0.0468% |
+| top 1% | +0.0470% | -0.0530% |
+| top 0.5% | +0.0913% | -0.0087% |
+| top 0.1% | +0.2859% | +0.1859% |
+
+Break-even round-trip cost is about 5 bps. Only the top 0.1% of bars - 2,889
+out of 2.89 million - clears it, which is exactly why exposure settled at
+1.06%. Lowering the entry threshold to trade more would lose money faster,
+not slower.
+
+The flat 5 bps per side was checked against IBKR's fixed schedule
+($0.005/share, $1 minimum). 98.2% of these trades hit the $1 minimum and the
+median position was only $879, so median commission is 11.4 bps per side; but
+those trades are small in dollars, and the dollar-weighted total comes to
++3.08% with no spread and +1.75% at a 2 bps half-spread, against +2.29% at
+the flat 5 bps. The cost assumption is fair and the conclusion does not turn
+on it.
+
+### The hold-out is now spent
+
+Every number above came from one run of one configuration. Any parameter
+chosen in light of it needs data this project has not read: either a period
+earlier than 2023-02, or forward paper trading.

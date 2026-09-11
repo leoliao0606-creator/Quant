@@ -489,6 +489,7 @@ def _fetch_chunked_historical_frame(
     bar_size: str,
     use_rth: bool,
     max_duration_per_request: str | None,
+    end_datetime: Any = "",
 ):
     pd = _load_pandas()
 
@@ -503,12 +504,12 @@ def _fetch_chunked_historical_frame(
             duration=duration,
             bar_size=bar_size,
             use_rth=use_rth,
-            end_datetime="",
+            end_datetime=end_datetime,
         )
 
     frames = []
     remaining_days = total_days
-    next_end = ""
+    next_end = end_datetime
     previous_earliest = None
     minimum_chunk_days = 7 if _is_intraday_bar_size(bar_size) else 30
     chunk_failures: list[str] = []
@@ -575,7 +576,15 @@ def fetch_historical_frame(
     bar_size: str,
     use_rth: bool,
     max_duration_per_request: str | None = None,
+    end_datetime: Any = "",
 ):
+    """Fetch bars ending at end_datetime, "" meaning now.
+
+    An explicit end lets a caller fetch only the part it is missing. IBKR
+    allows 60 historical requests per ten minutes per account, so re-fetching
+    a year that is already cached is the difference between a download taking
+    one hour and taking five.
+    """
     Stock = load_ib_components().Stock
 
     contract = Stock(symbol, "SMART", "USD")
@@ -588,4 +597,5 @@ def fetch_historical_frame(
         bar_size=bar_size,
         use_rth=use_rth,
         max_duration_per_request=max_duration_per_request,
+        end_datetime=end_datetime,
     )

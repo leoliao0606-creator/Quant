@@ -82,6 +82,27 @@ Gradient boosting only, barely tuned. Not a defect in the result, but it means
 "this is what the data supports" has not really been established - only "this
 is what this model found".
 
+## 10. Downloads cannot be parallelised, and the reason is not the quota
+
+Measured 2026-09-10. One 90-day chunk of 5-minute bars takes IBKR about 24
+seconds to return; a symbol needs 6 chunks, so one process fetches a symbol
+every 2.4 minutes. That is only ~25 historical requests per ten minutes
+against an account limit of 60, so the quota looks like it has room for a
+second process.
+
+It does not help. Running two processes on disjoint symbol lists, with
+distinct client ids, produced completion intervals of 1.9, 2.1 and 3.2
+minutes - a combined 2.4 minutes per symbol, identical to one process.
+Timings must be read from the cache files' mtimes, not from a script's
+running average, which hides the connection cost in the first symbol.
+
+The inference (well supported, not proven) is that TWS serialises historical
+data requests across all API clients. Extra connections split one queue
+instead of opening a second one. Do not try to speed a download up with more
+processes; the only real levers are fetching fewer bars and using larger
+chunks. `ibkr_ml/data.py` sleeps 0.2s between chunks, which is not the
+bottleneck and should be left alone.
+
 ## Resolved, kept here as a record
 
 - Backtest ran different rules from the live loop → both now call
