@@ -103,6 +103,26 @@ processes; the only real levers are fetching fewer bars and using larger
 chunks. `ibkr_ml/data.py` sleeps 0.2s between chunks, which is not the
 bottleneck and should be left alone.
 
+## 11. Changing the stop loss silently changes every position's size
+
+`_target_quantity` in `ibkr_ml/strategy.py` sizes a position as
+
+    min(risk_per_trade / stop_loss_pct, max_position_fraction) * equity
+
+so the stop is not only an exit rule, it is the denominator of the sizing
+formula. Widening the stop shrinks every position by the same factor.
+
+This turns any stop-loss sweep into a position-size sweep unless
+`risk_per_trade` moves with it. A sweep run on 2026-09-10 over stops of 5%,
+8%, 12% and 99% produced average exposures of 42.9%, 22.9%, 7.3% and 1.8%
+and returns that tracked them; the "no stops" arm looked like a failure when
+it was really running at a twelfth of the baseline position size. To hold
+notional constant while varying the stop, set
+`--risk-per-trade` to `target_fraction * stop_loss_pct`.
+
+The `RiskConfig` docstring does say this, and it is still easy to miss,
+because nothing in the output reports the resulting position fraction.
+
 ## Resolved, kept here as a record
 
 - Backtest ran different rules from the live loop → both now call

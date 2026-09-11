@@ -17,6 +17,33 @@ from dataclasses import fields, replace
 from pathlib import Path
 
 
+def load_range_frames(symbols, cache_dir, duration, bar_size, start, end):
+    """Bars inside one date window, from a single cached pull.
+
+    The daily cache holds one file per symbol covering twenty years, so a
+    hold-out is just a slice of it. The five-minute cache is not like that -
+    see load_holdout_frames.
+    """
+    from ibkr_ml.cache import load_cached_frame
+    from ibkr_ml.features import to_eastern_naive
+
+    frames = {}
+    for symbol in symbols:
+        frame, _ = load_cached_frame(cache_dir, symbol, duration, bar_size, True)
+        if frame is None:
+            continue
+        stamps = to_eastern_naive(frame["timestamp"])
+        keep = stamps < end
+        if start is not None:
+            keep &= stamps >= start
+        if keep.sum() <= 250:
+            continue
+        kept = frame[keep].copy()
+        kept["timestamp"] = stamps[keep]
+        frames[symbol] = kept.reset_index(drop=True)
+    return frames
+
+
 def load_holdout_frames(symbols, cache_dir, long_duration, cutoff):
     """Bars strictly before the cutoff, i.e. outside every earlier experiment."""
     import pandas as pd
@@ -74,6 +101,13 @@ def main() -> None:
     parser.add_argument("--model-path", default="artifacts/exp_Q_gpu.joblib")
     parser.add_argument("--cache-dir", default="data_cache")
     parser.add_argument("--long-duration", default="720 D")
+    parser.add_argument("--bar-size", default="5 mins")
+    parser.add_argument(
+        "--start",
+        default=None,
+        help="First bar to score. Leave unset to take everything before the "
+             "cutoff, which is what the five-minute hold-out did.",
+    )
     parser.add_argument(
         "--cutoff",
         default="2025-04-03",
@@ -103,7 +137,15 @@ def main() -> None:
     needed = sorted(set(traded) | set(references.values()))
 
     cutoff = pd.Timestamp(args.cutoff)
-    frames = load_holdout_frames(needed, args.cache_dir, args.long_duration, cutoff)
+    start = pd.Timestamp(args.start) if args.start else None
+    if args.bar_size == "5 mins" and start is None:
+        # The five-minute cache holds the same symbol under several duration
+        # tags covering different spans, so the right file has to be chosen
+        # per symbol rather than named.
+        frames = load_holdout_frames(needed, args.cache_dir, args.long_duration, cutoff)
+    else:
+        frames = load_range_frames(
+            needed, args.cache_dir, args.long_duration, args.bar_size, start, cutoff)
     missing = [s for s in needed if s not in frames]
     if missing:
         print(f"缺少留出数据的标的 ({len(missing)}): {missing[:8]}{'...' if len(missing) > 8 else ''}")
@@ -208,6 +250,16 @@ def main() -> None:
     )
     print(f"  对照 goal: {'通过' if passed else '未通过'}"
           f"  (年化>5%, Sharpe>=1.0, 回撤>-15%, 交易>=100)")
+    print()
+    print("  这个 goal 只比 SGOV。用 2026 年按流动性挑出的标的回溯历史，")
+    print("  长期做多本身就带上涨偏差，所以还要跑赢同期同敞口的等权买入持有：")
+    print(f"    python benchmark_buy_and_hold.py --start {dataset['timestamp'].min().date()} "
+          f"--end {dataset['timestamp'].max().date()} "
+          f"--exposure {result['mean_gross_exposure']:.4f}")
+    print("  以及跑赢随机信号（保留全部交易规则，只打乱概率）：")
+    print(f"    python permutation_test.py --model-path {args.model_path} "
+          f"--start {dataset['timestamp'].min().date()} "
+          f"--end {dataset['timestamp'].max().date()}")
 
 
 if __name__ == "__main__":

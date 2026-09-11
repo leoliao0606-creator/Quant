@@ -238,6 +238,18 @@ def _walk_forward_windows(row_count: int, validation_split: float, walk_forward_
     actual_splits = min(walk_forward_splits, available_rows // test_rows)
     if actual_splits <= 0:
         return []
+    if actual_splits < walk_forward_splits:
+        # Silently returning fewer folds than were asked for makes a run look
+        # better tested than it is: the summary says "fold_count: 3" and
+        # nothing says 6 were requested. Each fold costs validation_split of
+        # the rows twice over, so lowering --validation-split is what buys
+        # more of them.
+        print(
+            f"Walk-forward: asked for {walk_forward_splits} folds, room for "
+            f"{actual_splits} ({row_count:,} rows, {validation_rows:,} per "
+            f"validation and per test window, {minimum_train_rows:,} kept for "
+            f"training). Lower --validation-split for more folds."
+        )
 
     initial_train_end = row_count - actual_splits * test_rows - validation_rows
     windows = []

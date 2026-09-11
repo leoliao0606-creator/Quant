@@ -217,3 +217,128 @@ short holdings. `flatten_at_session_close` now defaults to reading the median
 bar interval and only flattens intraday bars; three tests in
 `tests/test_backtest.py::TestSessionCloseFlattening` hold the behaviour in
 place.
+
+## The daily-bar scan, inside the tuning window (2026-09-10)
+
+Twenty years of daily bars for 70 symbols cost 2.5 minutes to fetch - a
+single "20 Y" request returns fifteen years in 0.7 seconds, against 24
+seconds per 90-day chunk of five-minute bars. Four symbols drop out of the
+2006-2016 window: XLC launched in 2018, the current VXX contract was issued
+in 2018 after the original matured, and IBKR simply has no PEP before
+2017-12 or AVGO before 2016-02. Requesting those explicitly with an earlier
+end date returns empty, so the depth limit is IBKR's, not the request's.
+That leaves 66 symbols and 159,583 rows.
+
+Same features, same universe, same risk rules; only the label and the
+horizon change.
+
+| label | horizon | valid AUC | test AUC | valid ann. | test ann. | valid expo | test expo |
+|---|---|---|---|---|---|---|---|
+| direction | 3 | - | - | +1.32% | +0.30% | 2.2% | 6.6% |
+| direction | 10 | 0.5073 | 0.4991 | +1.72% | +0.98% | 9.8% | 7.1% |
+| direction | 21 | 0.4969 | 0.5420 | +5.56% | +5.98% | 20.9% | 22.9% |
+| market_relative | 10 | 0.5209 | 0.5191 | +9.03% | +7.55% | 32.7% | 35.8% |
+| market_relative | 21 | 0.5157 | 0.5272 | +6.47% | +0.27% | 30.9% | 21.9% |
+
+Longer horizons do help, which is what a fixed per-round-trip cost against a
+growing predictable move predicts. But the 21-day direction run returned
++5.56% on a fold whose AUC was 0.4969 - worse than a coin - so the return
+cannot be coming from the ranking, and that had to be resolved before any of
+these numbers meant anything.
+
+### The permutation control
+
+`permutation_test.py` keeps every rule and replaces only the probabilities
+with a permutation of themselves. Read the Sharpe column: permuting destroys
+the persistence that keeps a slot filled, so a scrambled signal opens more
+positions and runs at 33-73% exposure against the real 22%, and returns at
+different exposures are not comparable.
+
+| model | fold | real Sharpe | permuted median | p (Sharpe) | p (return) |
+|---|---|---|---|---|---|
+| direction 21 | validation | 1.54 | 0.90 | 0.0398 | 0.3881 |
+| direction 21 | test | 1.92 | 0.47 | 0.0050 | 0.0597 |
+| market_relative 10 | validation | 1.52 | 0.79 | 0.0348 | 0.1244 |
+| market_relative 10 | test | 0.67 | 0.45 | 0.2786 | 0.4080 |
+
+The 21-day direction model beats its own permutations on Sharpe in both
+folds and on return in neither. Its contribution is not picking bigger
+winners; it is reaching a similar return on a third to a half of the
+exposure. Per unit of average exposure the test fold returns 0.357 against
+0.085 for the permuted median.
+
+Two confounds checked and dismissed. Turnover: the permuted runs make 324
+trades against the real 264, and rerunning at `--transaction-cost-bps 0`
+leaves the result unchanged (real Sharpe 1.98, permuted median 0.53, p =
+0.0050), so commission explains none of the gap. Diversification: the
+permuted portfolios hold *more* positions, and volatility grows with the
+square root of the position count while exposure grows linearly, so they
+should score a *higher* Sharpe for the same per-position edge. They score
+lower.
+
+The market-relative label produced the only pair of folds with matching AUC
+(0.5209 and 0.5191), which looked like the most believable signal of the
+five, and then failed the permutation test on its test fold at p = 0.2786.
+Consistent AUC did not become a risk-adjusted edge.
+
+### What this does not yet establish
+
+Six configurations were run and the best was reported. Correcting for that
+by multiplying the p-values by six, the 21-day test fold survives at 0.03
+and its validation fold does not, at 0.24.
+
+The profit is also concentrated: on the test fold AMD alone is 29% of P&L,
+the top three are 60% and the top five 85%, and six take-profit exits supply
+53%. The validation fold is better spread - 29 of 33 symbols profitable, top
+three 45%.
+
+The reproduction windows used for the permutation runs were taken from the
+first and last trade dates rather than the fold boundaries, so they are
+narrower than the backtests they correspond to and the two sets of numbers
+should not be quoted together. Within each permutation run the real and
+permuted arms share a window, so the p-values stand.
+
+Hold-out A (2017-2019) stays untouched until one configuration survives more
+folds inside the tuning window.
+
+### Registered before running: hold-out A
+
+The 21-day direction configuration passed every check the tuning window can
+supply. Six walk-forward folds instead of three: 6 of 6 profitable, mean AUC
+0.5264, mean Sharpe 1.46. The stop-loss sweep redone with position size held
+constant (see known-issues #11 - the stop is the denominator of the sizing
+formula, so the first sweep varied size, not stops) keeps all eight fold
+results positive, including the arm with no stop and no take-profit at all:
++3.66% and +2.51%, Sharpe 1.19 and 0.83. The result is not an artefact of
+one risk setting.
+
+Scored now, once, on 2017-01-01 to 2019-12-31.
+
+The model is `artifacts/daily_h21.joblib` exactly as trained - no refit. It
+learned from 2006-09-18 to roughly 2014-02 (the first 70% of the tuning
+rows) and its thresholds were chosen on 2014-02 to 2015-05. Refitting on all
+tuning data would mean choosing a new train split and a new way to set
+thresholds, and those choices would be made having seen the tuning results.
+Leaving three years of data unused makes the test harder, not easier.
+
+Configuration: label direction, horizon 21 bars, minimum holding 21 bars,
+quadratic conviction sizing, 10 concurrent positions, max_position_fraction
+0.20, risk_per_trade 0.01, stop 8%, take-profit 15%, max daily loss 5%, 5 bps
+per side, references SPY and XLK, 66 symbols.
+
+It passes only if all of:
+
+| criterion | required |
+|---|---|
+| annualised return | > 5% |
+| Sharpe | >= 1.0 |
+| max drawdown | > -15% |
+| trades | >= 100 |
+| Sharpe vs equal-weight buy-and-hold at the same average exposure | higher |
+| permutation p on Sharpe, within-timestamp | < 0.05 |
+
+The last two exist because the first four can be met without a model: the
+2026 universe run backwards drifts upward on its own, and a fold with AUC
+0.4969 still returned +5.56%.
+
+Hold-out B (2020-2022) stays closed regardless of the outcome.
