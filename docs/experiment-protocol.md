@@ -777,3 +777,64 @@ targeting is a drawdown tool. Its risk-adjusted gain is concentrated in
 the window containing a prolonged bear market and is absent from the one
 without - the same shape as trend timing - but it costs two points a year
 rather than six to nine, and it never goes fully flat.
+
+### Mean reversion at the index level, and why it is not added
+
+Cross-sectional short-term reversal is negative in this universe: buying
+the stocks that fell most over a month lost 9% a year against the basket.
+Index-level reversion is a different claim and it is present. Grouping
+days by the index's trailing three-day move and reading the excess over
+the unconditional average:
+
+| bottom quintile, excess in bp | 1 day | 3 days | 5 days | 10 days |
+|---|---|---|---|---|
+| SPY 2006-2016 | +11.0 | +27.6 | +43.7 | +52.9 |
+| SPY 2017-2026 | +5.9 | +17.2 | +21.9 | +33.9 |
+| QQQ 2006-2016 | +15.6 | +27.3 | +35.1 | +33.5 |
+| QQQ 2017-2026 | +12.8 | +21.7 | +23.1 | +24.2 |
+
+Present in all four, and present whether volatility was high or low at the
+time, so it is not a restatement of the volatility effect.
+
+This matters because it contradicts the shipped rule. A decline raises
+measured volatility and the rule cuts exposure; these numbers say the days
+after a sharp decline pay better than average. So a tilt was tested:
+`weight = clip(target/volatility - beta x trailing 3-day return, 0, 1)`.
+
+On 2006-2016 beta = 5 is a clear improvement - Sharpe better than
+buy-and-hold in 13 of 13 against 12 of 13, median gain +0.144 against
++0.080, and annual return moving from -0.31% to +0.67%, so it beats
+buy-and-hold on return as well as risk. On 2017-2026 the same beta gives 6
+of 13 and a median of -0.024, slightly worse than no tilt at all. The
+shipped rule keeps beta = 0.
+
+### What the rule actually does, episode by episode
+
+Four techniques have now shown the same shape, and "works in a crisis" is
+too loose an explanation because the later window contains two crashes.
+SPY, the same fixed rule, scored over dated episodes:
+
+| episode | shape | buy and hold | rule | difference | drawdown held → rule |
+|---|---|---|---|---|---|
+| 2008 decline | slow | -56.1% | -36.1% | **+20.1%** | -56.5% → -36.5% |
+| 2009 recovery | rebound | +62.4% | +31.3% | **-31.1%** | -8.0% → -7.7% |
+| 2011 euro crisis | medium | -7.8% | -9.9% | -2.1% | -19.5% → -16.8% |
+| 2015-16 | medium | -1.7% | -2.3% | -0.7% | -14.4% → -12.8% |
+| 2018 Q4 | fast | +0.9% | -0.2% | -1.1% | -20.2% → -16.7% |
+| 2020 covid | very fast | +3.7% | +1.6% | -2.1% | **-34.1% → -18.0%** |
+| 2022 bear | slow | -14.5% | -12.7% | +1.7% | -25.4% → -21.0% |
+| 2025 pullback | - | +8.9% | +5.1% | -3.7% | -19.0% → -15.3% |
+
+The entire return advantage is 2008, and most of it is handed back in
+2009. Taken together, which is the only fair way since one does not happen
+without the other, buy-and-hold compounds to -28.7% across the two and the
+rule to -16.1%.
+
+The drawdown improves in all eight, including every episode where the rule
+loses on return. 2020 is the clearest: 2.1 points of return given up, and
+the worst drawdown cut from -34.1% to -18.0%.
+
+So the accurate description is: it pays one to four points a year in calm
+markets for a smaller drawdown in every kind of decline. Its return
+advantage appears only in slow grinding bears, it loses ground in V-shaped
+recoveries, and over a full cycle it comes out ahead.
