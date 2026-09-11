@@ -1037,6 +1037,33 @@ hold-outs, the evidence that this project cannot predict which stocks will
 outperform is now about as strong as this dataset can make it. What remains
 predictable here is risk, not return.
 
+### Both re-run on dividend-adjusted data (2026-09-11)
+
+All 253 stocks were refetched with ADJUSTED_LAST and both results
+recomputed, because a signal's alpha could in principle have been an
+artefact of dividend-driven price drops being read as negative momentum.
+It was not.
+
+The twelve signals still all fail, and the best of them is weaker: momentum
+6-0 goes from t = 1.40 to **t = 1.21** against the 2.87 threshold, alpha
+from +2.71% to +2.33%. Nine of twelve still land inside the random
+control's Sharpe range, which itself rises from a 0.60 median to 0.69 once
+dividends are counted. Return skew now clears the control alone (p =
+0.0495) with an alpha of +0.18% and t = 0.17, which is what a marginal
+control p-value looks like when there is nothing behind it.
+
+The volatility overlay still holds on the same book. Over 2006-2026 on 261
+names with dividends counted:
+
+| arm | annual | Sharpe | drawdown |
+|---|---|---|---|
+| equal-weight basket | +14.43% | 0.69 | -49.10% |
+| momentum selection | +13.32% | 0.65 | -48.42% |
+| momentum + overlay | +11.32% | 0.70 | **-32.54%** |
+
+Selection is still worth less than the basket it draws from. The overlay
+still removes 16.6 points of drawdown. Two data sets, same answer.
+
 ## Cross-asset trend following: six configurations, all rejected (2026-09-11)
 
 The last standard approach untried here. Trend timing on SPY alone was

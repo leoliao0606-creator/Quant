@@ -1,0 +1,10 @@
+{
+  "symbol": "TXN",
+  "duration": "20 Y",
+  "bar_size": "1 day",
+  "use_rth": true,
+  "fetched_at": "2026-09-11T17:03:13.814126+00:00",
+  "row_count": 3694,
+  "first_timestamp": "2012-01-03 00:00:00",
+  "last_timestamp": "2026-09-11 00:00:00"
+}

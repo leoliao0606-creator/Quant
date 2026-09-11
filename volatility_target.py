@@ -33,7 +33,9 @@ above are diversified products; the same rule applied to a 253-stock
 portfolio over 2006-2026 takes its drawdown from -49.8% to -31.9% and its
 Sharpe from 0.59 to 0.63, and over 2017-2026 alone from -34.1% to -17.4%.
 Same shape: drawdown much better, Sharpe better early and flat late, return
-lower. See `cross_section_audit.py --overlay`.
+lower. Recomputed on dividend-adjusted prices it is -49.1% to -32.5% with
+Sharpe 0.69 to 0.70, so the result does not depend on the price series
+having left distributions out. See `cross_section_audit.py --overlay`.
 
 So: a drawdown tool, not a Sharpe tool. The risk-adjusted gain appears in
 the window containing a prolonged bear market and vanishes in the one
