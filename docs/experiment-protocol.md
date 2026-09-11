@@ -838,3 +838,47 @@ So the accurate description is: it pays one to four points a year in calm
 markets for a smaller drawdown in every kind of decline. Its return
 advantage appears only in slow grinding bears, it loses ground in V-shaped
 recoveries, and over a full cycle it comes out ahead.
+
+### Two attempts to fix the recovery weakness, and why neither is adopted
+
+The episode table says the rule's one real cost is the rebound: after
+March 2009 realised volatility stayed high for months while the market
+rallied 62%, and the rule sat at 30 to 40%. Total volatility cannot tell a
+market falling violently from one rising violently. Two single changes,
+each argued from design rather than fitted:
+
+  downside volatility   the standard deviation of negative days only,
+                        rescaled by root-two. A rally with large up-days
+                        raises total volatility and leaves this alone.
+  de-risk only below    apply the scaling when price is under its 100-day
+  the trend             average and hold full size otherwise.
+
+| variant | 2006-2016 Sharpe beats hold | 2017-2026 | 2017-2026 median | 2009 rebound |
+|---|---|---|---|---|
+| total volatility (shipped) | 12 of 13 | 6 of 13 | -0.007 | +30.8% |
+| downside volatility | 12 of 13 | **10 of 13** | **+0.031** | +32.2% |
+| only below the trend | 11 of 13 | 7 of 13 | +0.019 | **+39.1%** |
+
+Downside volatility looks like a clear win on the verification window. The
+selection window cannot separate the three, so preferring it now would be
+choosing on the verification window - the mistake this project keeps
+finding in its own earlier work.
+
+A cleaner read was available. Which of two sizing rules is better is a
+relative question, and survivorship inflates both identically, so the 55
+individual stocks are a fresh sample for it:
+
+| | downside better than total | median | sign test |
+|---|---|---|---|
+| 2006-2016, 53 stocks | 26 of 53 | -0.000 | p = 1.0000 |
+| 2017-2026, 55 stocks | 35 of 55 | +0.021 | p = 0.0581 |
+
+One period is a coin flip and the other is marginal; 61 of 108 overall.
+The ETF result did not replicate. **The shipped rule keeps total
+volatility.**
+
+The same table says something worth keeping about where the rule belongs.
+On individual stocks over 2017-2026 it improves Sharpe in only 20 of 55
+and costs 4.23% a year at the median, against 6 of 13 and 2.03% on the
+index funds - single stocks jump, so the rule cuts too much - while the
+drawdown still improves in 55 of 55. It is an index tool.
