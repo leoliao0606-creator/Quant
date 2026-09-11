@@ -12,6 +12,12 @@ The funds here are the asset classes a trend-following book trades: equity
 indices, government and corporate bonds across maturities, commodities,
 currencies and property. None of them has a survivorship problem, since an
 index fund that closes is replaced by its index, not deleted from history.
+
+Use --what-to-show ADJUSTED_LAST for anything that compares one asset
+class with another. The default, TRADES, is the traded price and leaves
+dividends out, which understates SPY by 1.8% a year, AGG by 2.8% and gold
+by nothing - enough to make a bond fund look like a twenty-year loss and
+to hand gold an advantage it does not have.
 """
 
 from __future__ import annotations
@@ -51,6 +57,10 @@ def main() -> None:
     parser.add_argument("--client-id", type=int, default=131)
     parser.add_argument("--min-bars", type=int, default=4500,
                         help="A cached file shorter than this counts as truncated.")
+    parser.add_argument("--what-to-show", default="TRADES",
+                        choices=("TRADES", "ADJUSTED_LAST"),
+                        help="TRADES is the traded price and drops dividends; "
+                             "ADJUSTED_LAST adds them back for total return.")
     parser.add_argument("--force", action="store_true",
                         help="Re-download even a file that looks complete.")
     parser.add_argument("--attempts", type=int, default=3)
@@ -83,7 +93,8 @@ def main() -> None:
                     frame = fetch_historical_frame(
                         ib=ib, symbol=symbol, duration=args.duration,
                         bar_size="1 day", use_rth=True,
-                        max_duration_per_request=args.duration)
+                        max_duration_per_request=args.duration,
+                        what_to_show=args.what_to_show)
                     save_cached_frame(cache, symbol, args.duration, "1 day", True, frame)
                     print(f"{symbol}: {len(frame)} 行  "
                           f"{frame['timestamp'].min().date()} 起", flush=True)

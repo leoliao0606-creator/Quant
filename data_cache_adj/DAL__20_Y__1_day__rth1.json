@@ -1,0 +1,10 @@
+{
+  "symbol": "DAL",
+  "duration": "20 Y",
+  "bar_size": "1 day",
+  "use_rth": true,
+  "fetched_at": "2026-09-11T16:54:00.624675+00:00",
+  "row_count": 4876,
+  "first_timestamp": "2007-04-26 00:00:00",
+  "last_timestamp": "2026-09-11 00:00:00"
+}

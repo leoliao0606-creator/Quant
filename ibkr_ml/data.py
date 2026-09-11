@@ -435,6 +435,7 @@ def _request_historical_frame(
     bar_size: str,
     use_rth: bool,
     end_datetime: Any,
+    what_to_show: str = "TRADES",
 ):
     util = load_ib_components().util
 
@@ -448,7 +449,7 @@ def _request_historical_frame(
             endDateTime=end_datetime,
             durationStr=duration,
             barSizeSetting=bar_size,
-            whatToShow="TRADES",
+            whatToShow=what_to_show,
             useRTH=use_rth,
             formatDate=1,
             keepUpToDate=False,
@@ -490,6 +491,7 @@ def _fetch_chunked_historical_frame(
     use_rth: bool,
     max_duration_per_request: str | None,
     end_datetime: Any = "",
+    what_to_show: str = "TRADES",
 ):
     pd = _load_pandas()
 
@@ -505,6 +507,7 @@ def _fetch_chunked_historical_frame(
             bar_size=bar_size,
             use_rth=use_rth,
             end_datetime=end_datetime,
+            what_to_show=what_to_show,
         )
 
     frames = []
@@ -525,6 +528,7 @@ def _fetch_chunked_historical_frame(
                 bar_size=bar_size,
                 use_rth=use_rth,
                 end_datetime=next_end,
+                what_to_show=what_to_show,
             )
         except Exception as exc:
             # Keep every attempt's diagnostics. Discarding them lost the IBKR
@@ -577,8 +581,17 @@ def fetch_historical_frame(
     use_rth: bool,
     max_duration_per_request: str | None = None,
     end_datetime: Any = "",
+    what_to_show: str = "TRADES",
 ):
     """Fetch bars ending at end_datetime, "" meaning now.
+
+    what_to_show selects what the bars measure. "TRADES" is the traded
+    price and ignores dividends, which makes a bond fund look like it lost
+    money over twenty years because it pays its coupon out and the price
+    returns to par. "ADJUSTED_LAST" adds distributions back, so the series
+    is total return. The difference is 1.8% a year on SPY, 2.8% on AGG and
+    zero on GLD, which is large enough to reverse a comparison between
+    asset classes.
 
     An explicit end lets a caller fetch only the part it is missing. IBKR
     allows 60 historical requests per ten minutes per account, so re-fetching
@@ -598,4 +611,5 @@ def fetch_historical_frame(
         use_rth=use_rth,
         max_duration_per_request=max_duration_per_request,
         end_datetime=end_datetime,
+        what_to_show=what_to_show,
     )

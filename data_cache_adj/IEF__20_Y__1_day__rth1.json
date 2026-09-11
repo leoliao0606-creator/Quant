@@ -1,0 +1,10 @@
+{
+  "symbol": "IEF",
+  "duration": "20 Y",
+  "bar_size": "1 day",
+  "use_rth": true,
+  "fetched_at": "2026-09-11T16:50:21.942004+00:00",
+  "row_count": 2289,
+  "first_timestamp": "2017-08-03 00:00:00",
+  "last_timestamp": "2026-09-11 00:00:00"
+}

@@ -1095,6 +1095,126 @@ for TLT and before 2017 for IEF and SHY, so the long-duration Treasury leg
 contains the crisis; ETFs charge fees that futures do not; and a 21-day
 rebalance is slower than most of the industry runs.
 
+## The data was missing dividends, and a portfolio that works (2026-09-11)
+
+### The defect
+
+Every price series in this project came from IBKR with `whatToShow=TRADES`,
+which is the traded price and excludes distributions. It was noticed when a
+20-year decomposition put AGG, an investment-grade bond fund, at **-0.16% a
+year**. A bond fund pays its coupon out and its price returns to par, so a
+price-only series shows the payout as a loss.
+
+Refetching the same bars with `ADJUSTED_LAST` measures the size of it:
+
+| | TRADES | ADJUSTED_LAST | difference |
+|---|---|---|---|
+| SPY | +13.68% | +15.52% | +1.84% |
+| AGG | -1.49% | +1.35% | +2.84% |
+| GLD | +12.26% | +12.26% | 0.00% |
+
+The error is not uniform - it is proportional to what an asset pays out.
+Gold pays nothing, bonds pay the most, so a price-only comparison between
+asset classes hands gold roughly three points a year over bonds that it
+does not have. Every cross-asset conclusion in this file before this point
+was computed that way. Single-asset conclusions are unaffected in relative
+terms, since both arms of those comparisons hold the same instrument.
+
+`ibkr_ml/data.py` now takes `what_to_show`, `fetch_assets.py` exposes it,
+and the funds were refetched into `data_cache_adj`.
+
+### What changed
+
+60/40's Sharpe goes from 0.39 to 0.59 once the coupon is counted. That
+single correction moves it from clearly worse than SPY to clearly better,
+and it was an artefact of the data the whole time.
+
+Full period 2006-2026, monthly rebalancing, 5 bps a side, Sharpe on return
+above each period's bill rate:
+
+| allocation | annual | volatility | Sharpe | Sortino | drawdown |
+|---|---|---|---|---|---|
+| SPY 100% | +11.03% | 19.46% | 0.56 | 0.68 | -55.41% |
+| SPY + overlay | +10.19% | 13.62% | 0.67 | 0.87 | -36.12% |
+| 60/40 | +8.03% | 11.75% | 0.59 | 0.73 | -36.55% |
+| 60/40 + overlay | +7.54% | 9.17% | 0.68 | 0.87 | -27.61% |
+| stocks/bonds/gold in thirds | +8.52% | 9.51% | 0.75 | 0.97 | -23.86% |
+| thirds + overlay | +7.33% | 7.87% | 0.75 | 0.97 | -16.58% |
+| stocks/bonds/TIPS in thirds | +5.92% | 7.11% | 0.63 | 0.79 | -22.09% |
+| TIPS thirds + overlay | +5.50% | 5.53% | 0.73 | 0.97 | -15.01% |
+
+Both halves agree: the thirds allocation runs Sharpe 0.63 against SPY's
+0.41 over 2006-2016 and 0.91 against 0.75 over 2017-2026.
+
+### The overlay had to change to be usable
+
+volatility_target.py aims at a fixed 16%, chosen from outside the data as
+the long-run volatility of US equities. A diversified book runs near 10%,
+so min(16%/vol, 1) is 1 almost every day and the rule does nothing. The
+constant is replaced by the book's own long-run volatility from an
+expanding window of everything up to the previous day: "hold less when this
+book is moving more than it usually does". No constant is chosen by anyone
+and nothing reads forward. On SPY the two forms agree closely enough to
+treat the substitution as sound - +10.78% at 0.65 against +10.19% at 0.67.
+
+### How much of this is gold having a good twenty years
+
+Gold returned 10.22% a year over this window, within a point of SPY, at
+lower volatility. It has no cash flow, so its expected long-run real return
+is near zero, and it was roughly flat in nominal terms from 1980 to 2000.
+Replacing its average daily return with something lower while keeping its
+volatility and correlations intact:
+
+| allocation | gold as-was | gold 5% | gold 2.5% | gold 0% |
+|---|---|---|---|---|
+| SPY 100% | 0.56 | 0.56 | 0.56 | 0.56 |
+| 60/40 | 0.59 | 0.59 | 0.59 | 0.59 |
+| thirds with gold | 0.74 | 0.53 | 0.44 | 0.36 |
+| thirds with TIPS | 0.64 | 0.64 | 0.64 | 0.64 |
+| 40/30/15/15 | 0.72 | 0.62 | 0.58 | 0.54 |
+
+**The thirds allocation stops beating SPY as soon as gold earns less than
+about 5% a year.** Its apparent advantage is mostly gold's twenty-year run,
+not diversification.
+
+Diversification on its own is worth less than it looks. Setting all three
+assets to the same average return and keeping their real volatilities and
+correlations, the combined book scores 0.45 at a 6% common return while
+AGG alone scores 0.81 - because with equal returns the lowest-volatility
+asset wins on Sharpe by definition. What diversification does deliver is
+real but narrower: the book's volatility is 9.71% against the 14.45%
+average of its parts, a third lower. Lower volatility only becomes a higher
+Sharpe if the return holds up too.
+
+Two structural facts about gold do survive this. Its correlation to SPY is
+0.07 over twenty years, and it protected the book in two crises of opposite
+character - 2008, a deflationary credit collapse, gold +5.13% against SPY's
+-36.87%, and 2022, an inflationary rate shock, gold -0.77% against SPY's
+-18.18% and AGG's -13.02%. The diversification is real; the 10% return is
+not something to plan around.
+
+### What to actually hold
+
+Two answers, and the distinction between them matters.
+
+**Chosen without looking: stocks/bonds/TIPS in thirds, with the overlay.**
++5.50% a year, Sharpe 0.73, worst drawdown -15.01%. Every component has a
+cash flow, so nothing here depends on an assumption about gold, and all
+three are textbook holdings rather than weights found by searching. It
+beats SGOV by 1.2 points with a fifteen-point drawdown, and beats SPY's
+Sharpe by 0.17 while earning 5.5 points a year less.
+
+**Chosen after looking: 40% SPY / 30% AGG / 15% gold / 15% TIPS, with the
+overlay.** +6.84% a year, Sharpe 0.77, drawdown -18.70% - the best row in
+the table. It holds enough gold for the crisis correlation and not enough
+to depend on gold's return; at gold 0% it still scores 0.54. But these
+weights were written after reading the sensitivity table above, which makes
+this a fitted answer and not an independent one. It is recorded as the
+better guess, not as evidence.
+
+Neither beats SPY on return, and nothing found in this project does. What
+they beat is SPY's Sharpe and, by a wide margin, SPY's drawdown.
+
 ## RETRACTED: the momentum result above was look-ahead bias (2026-09-11)
 
 Everything in the section that follows is withdrawn. The alphas in it were
