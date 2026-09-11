@@ -63,11 +63,16 @@ OVERLAY_WINDOW = 20
 
 
 def load_universe(cache_dir, duration, start, end, min_bars):
-    """Every cached company with at least `min_bars` days inside the window."""
+    """Every cached company with at least `min_bars` days inside the window.
+
+    Close and volume come back from one pass over one file each, because an
+    earlier bug in this project read them separately and parsed the dates
+    two different ways, which put volume a day out of step with price.
+    """
     names = sorted({p.name.split("__")[0]
                     for p in Path(cache_dir).glob(f"*__{duration.replace(' ', '_')}"
                                                   "__1_day__rth1.csv")} - FUNDS)
-    columns = {}
+    prices, volumes = {}, {}
     for symbol in names:
         frame, _ = load_cached_frame(cache_dir, symbol, duration, "1 day", True)
         if frame is None:
@@ -80,21 +85,55 @@ def load_universe(cache_dir, duration, start, end, min_bars):
             keep &= stamps < pd.Timestamp(end)
         if keep.sum() < min_bars:
             continue
-        columns[symbol] = pd.Series(frame.loc[keep, "close"].to_numpy(float),
-                                    index=stamps[keep].to_numpy())
-    if not columns:
+        index = stamps[keep].to_numpy()
+        prices[symbol] = pd.Series(frame.loc[keep, "close"].to_numpy(float), index=index)
+        volumes[symbol] = pd.Series(frame.loc[keep, "volume"].to_numpy(float), index=index)
+    if not prices:
         raise SystemExit(f"{cache_dir} 里没有符合条件的日线数据")
-    return pd.DataFrame(columns).sort_index()
+    closes = pd.DataFrame(prices).sort_index()
+    return closes, pd.DataFrame(volumes).reindex_like(closes)
 
 
-def signal_table(closes, returns):
+def rolling_beta(returns, basket, window=252):
+    """Each name's sensitivity to the basket, from a trailing window.
+
+    Beta is the slope of the name's return regressed on the basket's, so a
+    beta of 1.2 means the name typically moves 1.2% when the market moves
+    1%. Computed as covariance over variance, which is the same number.
+    """
+    covariance = returns.rolling(window).cov(basket)
+    variance = basket.rolling(window).var()
+    return covariance.div(variance, axis=0)
+
+
+def signal_table(closes, volumes, returns, basket):
+    """Twelve cross-sectional signals, each usable at the close of the day.
+
+    Every one is shifted a further day by choose_names before it decides
+    anything, so nothing here can read a price it would not have had.
+    """
+    beta = rolling_beta(returns, basket)
+    market = (1.0 + basket).cumprod()
+    stock_12_1 = closes.shift(21) / closes.shift(252) - 1.0
+    market_12_1 = (market.shift(21) / market.shift(252) - 1.0)
+    residual = returns.sub(beta.mul(basket, axis=0))
+    dollar_volume = (volumes * closes).replace(0.0, np.nan)
+    volatility_126 = returns.rolling(126).std()
     return {
-        "动量 12-1": closes.shift(21) / closes.shift(252) - 1.0,
+        "动量 12-1": stock_12_1,
         "动量 12-0": closes / closes.shift(252) - 1.0,
         "动量 6-0": closes / closes.shift(126) - 1.0,
-        "短期反转": -(closes / closes.shift(21) - 1.0),
-        "低波动": -returns.rolling(126).std(),
-        "趋势 价格/200日均线": closes / closes.rolling(200).mean() - 1.0,
+        "残差动量": stock_12_1.sub(beta.shift(21).mul(market_12_1, axis=0)),
+        "波动调整动量": stock_12_1 / volatility_126,
+        "52周高点接近度": closes / closes.rolling(252).max(),
+        "MAX 效应": -returns.rolling(21).max(),
+        "特质波动率": -residual.rolling(126).std(),
+        "成交额骤增": -(dollar_volume.rolling(21).mean()
+                    / dollar_volume.rolling(252).mean()),
+        "收益偏度": -returns.rolling(126).skew(),
+        "低贝塔": -beta,
+        "加速度": (closes / closes.shift(63) - 1.0)
+               - (closes.shift(63) / closes.shift(252) - 1.0),
     }
 
 
@@ -204,8 +243,8 @@ def overlay_weights(gross, target=OVERLAY_TARGET, window=OVERLAY_WINDOW):
     return (target / trailing).clip(upper=1.0).fillna(0.0)
 
 
-def run_timing_comparison(args, closes, returns, filled, available, basket,
-                          rebalance_days, top):
+def run_timing_comparison(args, closes, volumes, returns, filled, available,
+                          basket, rebalance_days, top):
     _, base = score(available.div(available.sum(axis=1), axis=0),
                     pd.Series(0.0, index=closes.index), returns, args.cost_bps)
     print(f"区间 {closes.index.min().date()} .. {closes.index.max().date()}   "
@@ -219,7 +258,7 @@ def run_timing_comparison(args, closes, returns, filled, available, basket,
     print(header)
     print("-" * len(header))
     lagged_sharpe = {}
-    for name, raw in signal_table(closes, returns).items():
+    for name, raw in signal_table(closes, volumes, returns, basket).items():
         for tag, lag, drift in (("A 原版", 0, False),
                                 ("B 滞后一天", 1, False),
                                 ("C B+权重漂移", 1, True)):
@@ -255,6 +294,69 @@ def run_timing_comparison(args, closes, returns, filled, available, basket,
     for name, sharpe in lagged_sharpe.items():
         p = (int((control >= sharpe).sum()) + 1) / (args.draws + 1)
         print(f"  {name:<20} Sharpe {sharpe:.2f}   p = {p:.4f}")
+
+
+def run_family(args, closes, volumes, returns, filled, available, basket,
+               rebalance_days, top):
+    """Score every signal against the criteria registered before this ran.
+
+    One weight matrix per signal, built once over the whole history with
+    the lagged, drifting convention, then sliced into the two halves and
+    the full period. Slicing a single matrix rather than rebuilding it per
+    period keeps the rebalance dates identical across the three columns.
+    """
+    periods = [(args.start, args.split, "2006-2016"),
+               (args.split, args.end, "2017-2026"),
+               (args.start, args.end, "全期")]
+    masks = [((closes.index >= pd.Timestamp(a)) & (closes.index < pd.Timestamp(b)), tag)
+             for a, b, tag in periods]
+
+    def alpha_in(weights, traded, mask, cost):
+        net, _ = score(weights[mask], traded[mask], returns[mask], cost)
+        alpha, _, _, nw_t = alpha_against(net, basket[mask])
+        return alpha, nw_t, net
+
+    print(f"{closes.shape[1]} 只   前 {top} 名   每 {args.rebalance} 天调仓   "
+          f"信号滞后 1 天，持仓随价格漂移")
+    print(f"判据（跑之前已注册）：两期阿尔法皆为正 / 全期 t(NW) > 2.87（= 0.05/12）"
+          f" / 随机对照 p < 0.05 / 20bp 下阿尔法仍为正\n")
+
+    rng = np.random.default_rng(args.seed)
+    columns = np.array(closes.columns)
+    listed = {day: columns[available.loc[day].to_numpy()] for day in rebalance_days}
+    control = []
+    for _ in range(args.draws):
+        draw = {d: list(rng.choice(listed[d], size=min(top, len(listed[d])),
+                                   replace=False)) for d in rebalance_days}
+        w, t = let_drift(draw, closes, filled, top)
+        control.append(score(w, t, returns, args.cost_bps)[1]["sharpe"])
+    control = np.array(control)
+    print(f"随机对照（只从当天在市的名字里抽，{args.draws} 次，全期）："
+          f"Sharpe 中位数 {np.median(control):.2f}   "
+          f"区间 [{control.min():.2f}, {control.max():.2f}]\n")
+
+    header = (f"{'信号':<16} {'06-16 α':>9} {'17-26 α':>9} {'全期 α':>9} "
+              f"{'t(NW)':>7} {'Sharpe':>7} {'随机p':>7} {'20bp α':>8}  判据")
+    print(header)
+    print("-" * (len(header) + 4))
+    passes = []
+    for name, raw in signal_table(closes, volumes, returns, basket).items():
+        picks = choose_names(raw, available, rebalance_days, top, 1)
+        weights, traded = let_drift(picks, closes, filled, top)
+        early, _, _ = alpha_in(weights, traded, masks[0][0], args.cost_bps)
+        late, _, _ = alpha_in(weights, traded, masks[1][0], args.cost_bps)
+        full, nw_t, net = alpha_in(weights, traded, masks[2][0], args.cost_bps)
+        dear, _, _ = alpha_in(weights, traded, masks[2][0], 20.0)
+        sharpe = score(weights, traded, returns, args.cost_bps)[1]["sharpe"]
+        p = (int((control >= sharpe).sum()) + 1) / (args.draws + 1)
+        checks = [early > 0 and late > 0, nw_t > 2.87, p < 0.05, dear > 0]
+        mark = "".join("abcd"[i] if ok else "." for i, ok in enumerate(checks))
+        if all(checks):
+            passes.append(name)
+        print(f"{name:<16} {early:>+8.2%} {late:>+8.2%} {full:>+8.2%} "
+              f"{nw_t:>+7.2f} {sharpe:>7.2f} {p:>7.4f} {dear:>+7.2%}  {mark}")
+    print(f"\n判据字母表示该项通过，句点表示未通过。全部通过的信号："
+          f"{'、'.join(passes) if passes else '无'}")
 
 
 def run_overlay(args, closes, returns, filled, available, rebalance_days, top):
@@ -319,13 +421,18 @@ def main() -> None:
     parser.add_argument("--lag", type=int, default=1,
                         help="Days between reading the signal and holding the "
                              "position. 0 reproduces the biased original.")
+    parser.add_argument("--split", default="2017-01-01",
+                        help="Boundary between the two halves in --family.")
+    parser.add_argument("--family", action="store_true",
+                        help="Score all twelve signals against the registered "
+                             "criteria, in both halves and the full period.")
     parser.add_argument("--overlay", action="store_true",
                         help="Momentum selection with the volatility target on "
                              "top, by period and by year.")
     args = parser.parse_args()
 
-    closes = load_universe(args.cache_dir, args.duration, args.start, args.end,
-                           args.min_bars)
+    closes, volumes = load_universe(args.cache_dir, args.duration, args.start,
+                                    args.end, args.min_bars)
     returns = closes.pct_change(fill_method=None)
     filled = returns.fillna(0.0)
     available = closes.notna()
@@ -333,11 +440,14 @@ def main() -> None:
     top = max(int(closes.shape[1] * args.top_fraction), 10)
     rebalance_days = closes.index[::args.rebalance]
 
-    if args.overlay:
+    if args.family:
+        run_family(args, closes, volumes, returns, filled, available, basket,
+                   rebalance_days, top)
+    elif args.overlay:
         run_overlay(args, closes, returns, filled, available, rebalance_days, top)
     else:
-        run_timing_comparison(args, closes, returns, filled, available, basket,
-                              rebalance_days, top)
+        run_timing_comparison(args, closes, volumes, returns, filled, available,
+                              basket, rebalance_days, top)
 
 
 if __name__ == "__main__":

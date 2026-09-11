@@ -991,6 +991,52 @@ rather than in expectation of finding an anomaly, and a clean negative
 across twelve published effects is itself the answer to whether stock
 selection is where this project should spend its remaining time.
 
+## Result: none of the twelve passed (2026-09-11)
+
+Run with `python cross_section_audit.py --family --draws 100`. Criteria as
+registered above; the letters mark which of (a) both halves positive,
+(b) Newey-West t over 2.87, (c) random control p under 0.05, (d) alpha
+still positive at 20 bps were met.
+
+| signal | 2006-2016 | 2017-2026 | full | t(NW) | Sharpe | p | 20 bps | met |
+|---|---|---|---|---|---|---|---|---|
+| momentum 12-1 | -2.01% | +4.38% | +1.19% | +0.60 | 0.64 | 0.168 | +0.32% | ...d |
+| momentum 12-0 | -1.44% | +4.83% | +1.69% | +0.84 | 0.66 | 0.059 | +0.86% | ...d |
+| momentum 6-0 | +0.88% | +4.52% | +2.71% | +1.40 | 0.72 | 0.010 | +1.58% | a.cd |
+| residual momentum | -2.77% | +4.17% | +0.61% | +0.33 | 0.63 | 0.248 | -0.28% | .... |
+| vol-scaled momentum | -3.03% | +2.34% | -0.38% | -0.21 | 0.57 | 0.762 | -1.31% | .... |
+| 52-week-high | -3.11% | +0.99% | -1.09% | -0.69 | 0.51 | 1.000 | -2.75% | .... |
+| MAX effect | -2.81% | -2.80% | -2.77% | -2.13 | 0.44 | 1.000 | -4.97% | .... |
+| idiosyncratic vol | -0.51% | -1.07% | -0.59% | -0.40 | 0.58 | 0.693 | -1.13% | .... |
+| dollar-volume spike | -0.80% | -1.08% | -0.92% | -0.69 | 0.60 | 0.485 | -2.91% | .... |
+| return skew | -0.94% | +1.08% | +0.04% | +0.03 | 0.65 | 0.109 | -0.94% | .... |
+| low beta | -0.93% | -0.59% | -0.81% | -0.44 | 0.47 | 1.000 | -1.11% | .... |
+| acceleration | -2.06% | -3.88% | -2.93% | -1.58 | 0.48 | 1.000 | -4.32% | .... |
+
+The random control's full-period Sharpe runs 0.52 to 0.71 with a median of
+0.60, and nine of the twelve signals land inside it.
+
+The best of them, momentum 6-0, clears three of four and fails the one that
+was set to account for having tried twelve: t = 1.40 against a threshold of
+2.87. Without the correction it would read as p < 0.05 and this section
+would say something different, which is the reason the threshold was
+written down first.
+
+One pattern is worth recording. All four momentum variants - 12-1, 12-0,
+6-0 and residual - read about -2% over 2006-2016 and about +4.5% over
+2017-2026. Four signals cannot break at the same date by coincidence; the
+2008-2009 momentum crash sits inside the first window and nothing like it
+sits inside the second. That makes the split a single event rather than a
+stable effect, and it also means the +4.5% column is a description of a
+decade without a crash, not a forecast of one.
+
+**Stock selection is closed.** Twelve published cross-sectional effects,
+253 US names, twenty years, one repaired pipeline, and a threshold set in
+advance: nothing. Combined with the six direction models that failed their
+hold-outs, the evidence that this project cannot predict which stocks will
+outperform is now about as strong as this dataset can make it. What remains
+predictable here is risk, not return.
+
 ## RETRACTED: the momentum result above was look-ahead bias (2026-09-11)
 
 Everything in the section that follows is withdrawn. The alphas in it were
