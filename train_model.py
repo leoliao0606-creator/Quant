@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 
 from ibkr_ml.config import (
@@ -295,20 +296,47 @@ def main() -> None:
         from ibkr_ml.features import to_eastern_naive
 
         cutoff = pd.Timestamp(args.end_date)
-        truncated = {}
+        minimum_rows = 250
+        truncated, dropped = {}, {}
         for symbol, frame in frames.items():
             stamps = to_eastern_naive(frame["timestamp"])
             kept = frame[stamps < cutoff]
-            if kept.empty:
-                raise SystemExit(
-                    f"{symbol} 在 {args.end_date} 之前没有数据，无法训练"
-                )
+            # A symbol that listed after the cutoff is not an error - XLC
+            # launched in 2018, and the current VXX contract was issued in
+            # 2018 after the original matured. Drop those and say so. A
+            # reference symbol is different: its series feeds a merge_asof
+            # that would silently discard every traded row, so that aborts.
+            if len(kept) < minimum_rows:
+                dropped[symbol] = len(kept)
+                continue
             truncated[symbol] = kept.reset_index(drop=True)
+
+        missing_references = sorted(
+            symbol for symbol in reference_symbols.values() if symbol not in truncated
+        )
+        if missing_references:
+            raise SystemExit(
+                f"参照标的 {missing_references} 在 {args.end_date} 之前"
+                f"不足 {minimum_rows} 根K线，跨资产特征会整段丢失，已中止"
+            )
+        if not truncated:
+            raise SystemExit(f"没有标的在 {args.end_date} 之前有足够数据")
+
+        if dropped:
+            listing = ", ".join(f"{s}({n})" for s, n in sorted(dropped.items()))
+            print(
+                f"Dropped {len(dropped)} symbols with fewer than {minimum_rows} "
+                f"bars before {args.end_date}: {listing}"
+            )
         frames = truncated
+        market_config = replace(
+            market_config,
+            symbols=tuple(s for s in market_config.symbols if s in truncated),
+        )
         example = next(iter(frames.values()))
         print(
             f"Truncated to bars before {args.end_date}: "
-            f"{len(example)} bars per symbol, last "
+            f"{len(frames)} symbols, {len(example)} bars in the first, last "
             f"{to_eastern_naive(example['timestamp']).max()}"
         )
 
