@@ -919,6 +919,78 @@ capitalisation-weighted index, which is the mega-cap concentration of the
 last decade seen from the other side. For the stated goal, SPY is a better
 starting point than any equal-weight stock basket assembled here.
 
+## Registered before running: twelve cross-sectional signals (2026-09-11)
+
+Written before the run. The point of writing it first is that with twelve
+signals and two periods there are twenty-four cells, and at the usual 5%
+threshold more than one will look significant by chance alone.
+
+### Why run this at all
+
+Look-ahead bias runs both ways. It made momentum 12-0 look like +4.87% when
+it earns +1.64%, and it made short reversal look like -6.80% when it earns
+-0.90%. Any signal rejected here on a number produced by the broken
+pipeline was rejected on the wrong number, and a signal the bias pushed
+*down* would have been dismissed without a second look. So the whole family
+is re-scored on the repaired pipeline, and the family is widened at the
+same time, because the marginal cost of one more signal is now a line of
+code.
+
+### The twelve
+
+Momentum family, already re-scored, carried along as a reference:
+
+  1. momentum 12-1      `close[-21] / close[-252]`
+  2. momentum 12-0      `close / close[-252]`
+  3. momentum 6-0       `close / close[-126]`
+
+New, each with a published basis:
+
+  4. residual momentum      12-1 return less beta times the basket's, so a
+                            name is not credited for moving with the market
+  5. volatility-scaled mom  momentum 12-1 divided by 126-day volatility
+  6. 52-week-high proximity `close / max(close, 252)`
+  7. MAX effect             minus the largest single-day return of the last
+                            21 days; lottery-like names are said to
+                            underperform
+  8. idiosyncratic vol      minus the 126-day standard deviation of the
+                            residual from the basket
+  9. dollar-volume trend    minus (21-day dollar volume / 252-day dollar
+                            volume); names whose attention has just spiked
+ 10. return skew            minus the 126-day skew of daily returns
+ 11. low beta               minus the 252-day beta against the basket
+ 12. acceleration           3-month momentum less the prior 9-month
+
+Every signal is evaluated at the close of D-1 and earns from day D onward,
+holdings drift with price between rebalances, and trading happens only on a
+rebalance date. Top 20% of the universe, 21-day rebalance, 5 bps a side.
+
+### What counts as a pass
+
+All four, not the best of four:
+
+  a. Alpha against the equal-weight basket of the same universe is positive
+     in **both** 2006-2016 and 2017-2026. A signal that only works in one
+     half is the momentum mistake again.
+  b. Newey-West t on full-period alpha exceeds **2.87**. That is 0.05/12
+     two-sided: twelve signals are being tested, so the threshold moves.
+  c. The Sharpe beats a random control that draws only from names trading
+     that day, at p < 0.05.
+  d. Alpha stays positive at 20 bps a side.
+
+2017-2026 is no longer a clean hold-out; it was read during the momentum
+work. That is why (a) requires both halves rather than using one to choose
+and the other to confirm - the second read cannot carry the weight a first
+read would have.
+
+### What is expected
+
+Nothing passes. Six signals have already been re-scored and the largest
+surviving full-period t is below 1. This is being run to close the question
+rather than in expectation of finding an anomaly, and a clean negative
+across twelve published effects is itself the answer to whether stock
+selection is where this project should spend its remaining time.
+
 ## RETRACTED: the momentum result above was look-ahead bias (2026-09-11)
 
 Everything in the section that follows is withdrawn. The alphas in it were
