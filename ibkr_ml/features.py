@@ -362,7 +362,7 @@ def build_feature_frame(price_frame, bar_timezone: str | None = None, reference_
     return frame
 
 
-LABEL_MODES = ("absolute", "volatility_scaled", "direction")
+LABEL_MODES = ("absolute", "volatility_scaled", "direction", "market_relative")
 
 
 def build_target(
@@ -384,9 +384,24 @@ def build_target(
     volatility_scaled removes that free lunch by scaling the bar with current
     volatility, so a volatile stretch needs a proportionally larger move to
     count as a positive. direction drops the size question altogether.
+
+    direction has a problem of its own. On any given day almost every stock
+    moves with the market, so "will this stock rise" is largely "will the
+    market rise", and a model asked that question is being asked to time the
+    index. market_relative subtracts the market's move over the same window
+    and asks which stocks beat it - the question the excess-return and
+    relative-strength features were built to answer, and the one that does
+    not require calling the index.
     """
     if label_mode == "direction":
         return (frame["future_return"] > 0.0).astype(int)
+    if label_mode == "market_relative":
+        if "market_future_return" not in frame:
+            raise ValueError(
+                "label_mode='market_relative' needs a market reference series; "
+                "pass reference_frames with a 'mkt' entry."
+            )
+        return (frame["future_return"] > frame["market_future_return"]).astype(int)
     if label_mode == "volatility_scaled":
         threshold = volatility_threshold_multiple * frame["atr_14_pct"]
         return (frame["future_return"] > threshold).astype(int)
@@ -411,6 +426,15 @@ def build_labeled_rows(
     frame["symbol"] = symbol
     frame["future_return"] = frame["close"].shift(-horizon_bars) / frame["close"] - 1.0
     frame["next_bar_return"] = frame["close"].shift(-1) / frame["close"] - 1.0
+    if "mkt_close" in frame.columns:
+        # The market's move over the same window, for a label that asks which
+        # stocks beat the index rather than which ones rose. Shifted by the
+        # same horizon and no further, so it looks exactly as far ahead as
+        # future_return does and no part of it is known at decision time.
+        market_close = frame["mkt_close"]
+        frame["market_future_return"] = (
+            market_close.shift(-horizon_bars) / market_close - 1.0
+        )
     frame["target"] = build_target(
         frame, label_mode, positive_return_threshold, volatility_threshold_multiple
     )
@@ -424,6 +448,11 @@ def build_labeled_rows(
         "next_bar_return",
         "target",
     ]
+    # Kept when it exists so the label can be checked against the two returns
+    # it was built from. Nothing downstream selects features by position, and
+    # the rows it would drop as NaN are the same ones future_return drops.
+    if "market_future_return" in frame.columns:
+        columns.insert(columns.index("next_bar_return"), "market_future_return")
     rows = frame[columns].dropna().reset_index(drop=True)
     if rows.empty:
         raise ValueError(f"Not enough history to build features for symbol {symbol}.")

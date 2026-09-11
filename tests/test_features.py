@@ -475,6 +475,54 @@ class TestLabelModes:
         assert strict["target"].mean() < loose["target"].mean()
 
 
+class TestMarketRelativeLabel:
+    """Beating the market is a different question from going up.
+
+    Almost every stock moves with the index on any given day, so a direction
+    label mostly asks the model to call the index. The market_relative label
+    subtracts the index's move over the same window, which is the question
+    the excess-return features were built to answer.
+    """
+
+    def test_it_labels_only_what_beat_the_market(self):
+        market = reference_frame()
+        rows = build_labeled_rows(
+            "AAA", price_frame(), horizon_bars=3, positive_return_threshold=0.001,
+            reference_frames={"mkt": market}, label_mode="market_relative",
+        )
+        expected = (rows["future_return"] > rows["market_future_return"]).astype(int)
+        assert (rows["target"] == expected).all()
+
+    def test_a_stock_tracking_the_market_exactly_is_never_positive(self):
+        # Same series for stock and market: the difference is zero everywhere,
+        # and zero does not beat zero.
+        shared = price_frame()
+        rows = build_labeled_rows(
+            "AAA", shared, horizon_bars=3, positive_return_threshold=0.001,
+            reference_frames={"mkt": shared}, label_mode="market_relative",
+        )
+        assert rows["target"].sum() == 0
+
+    def test_it_refuses_to_run_without_a_market_series(self):
+        # Silently falling back to absolute direction would train a model on a
+        # different question than the one asked for.
+        with pytest.raises(ValueError, match="market reference"):
+            build_labeled_rows(
+                "AAA", price_frame(), horizon_bars=3,
+                positive_return_threshold=0.001, label_mode="market_relative",
+            )
+
+    def test_the_label_is_roughly_balanced(self):
+        # An absolute threshold in a drifting market can produce a lopsided
+        # label; measured against the market, about half of anything should
+        # win by construction.
+        rows = build_labeled_rows(
+            "AAA", price_frame(), horizon_bars=3, positive_return_threshold=0.001,
+            reference_frames={"mkt": reference_frame()}, label_mode="market_relative",
+        )
+        assert 0.25 < rows["target"].mean() < 0.75
+
+
 class TestMixedUtcOffsets:
     """A year of US bars spans a daylight-saving change.
 

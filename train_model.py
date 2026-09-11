@@ -37,14 +37,16 @@ def parse_args():
     parser.add_argument("--horizon-bars", type=int, default=3)
     parser.add_argument(
         "--label-mode",
-        choices=["absolute", "volatility_scaled", "direction"],
+        choices=["absolute", "volatility_scaled", "direction", "market_relative"],
         default="absolute",
         help=(
             "How the forward return becomes a label. absolute: beat a fixed "
             "return. volatility_scaled: beat a multiple of current ATR%%, so a "
             "volatile stretch needs a bigger move. direction: only which way "
-            "it went. The absolute form lets the model score well by "
-            "predicting volatility instead of direction."
+            "it went. market_relative: beat the market over the same window, "
+            "which needs --market-symbol. The absolute form lets the model "
+            "score well by predicting volatility instead of direction, and "
+            "the direction form mostly asks it to call the index."
         ),
     )
     parser.add_argument("--positive-return-threshold", type=float, default=0.001)
