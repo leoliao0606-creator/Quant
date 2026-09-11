@@ -714,3 +714,29 @@ That is not alpha. It is a better-shaped way to hold the same risk, it is
 the only result here whose parameter was fixed in one period and confirmed
 in another, and it is free of the survivorship problem that contaminates
 every result computed on the 66-symbol basket.
+
+### The same fixed rule on thirteen index funds (2026-09-11)
+
+Every constant was already set - 16% target, 20-day window, cap 1.0, 5%
+band - so the rule can be pointed at the rest of the cache without fitting
+anything further. Index funds only: their membership follows rules rather
+than hindsight, so the survivorship problem in the single-stock work does
+not apply here.
+
+| | Sharpe improved | Sharpe worse | drawdown improved |
+|---|---|---|---|
+| 2006-2016 | 13 of 13 | 0 | 13 of 13 |
+| 2017-2026 | 10 of 13 | 3 | 13 of 13 |
+
+The three that lose Sharpe are IWM (-0.05), XLE (-0.06) and XLB (-0.10),
+all in the later period, and all three still cut their worst drawdown by
+13 to 22 points.
+
+The clearest single case is XLF through the financial crisis: buy-and-hold
+returned -1.69% annualised at a worst drawdown of -83.7%, and the same
+rule returned +3.73% at -42.7%. Volatility rose before the collapse
+finished, and the rule was already smaller.
+
+Twenty-six instrument-period pairs, drawdown improved in every one, mean
+improvement about 18 points. That is the strongest evidence in this
+project, and it is evidence for a risk overlay rather than for a forecast.
