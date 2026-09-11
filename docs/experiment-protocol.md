@@ -342,3 +342,79 @@ The last two exist because the first four can be met without a model: the
 0.4969 still returned +5.56%.
 
 Hold-out B (2020-2022) stays closed regardless of the outcome.
+
+### Hold-out A, scored once on 2026-09-10
+
+`artifacts/daily_h21.joblib`, unmodified, on 2017-03-30 to 2019-12-31.
+44,418 rows, 673 trading days, 66 symbols.
+
+| criterion | required | measured | |
+|---|---|---|---|
+| annualised return | > 5% | **+2.91%** | fail |
+| Sharpe | >= 1.0 | **0.67** | fail |
+| max drawdown | > -15% | -10.43% | pass |
+| trades | >= 100 | 502 | pass |
+| Sharpe vs buy-and-hold at 18.42% exposure | higher | **0.67 vs 1.19** | fail |
+
+AUC 0.4925. Total return +7.97% over 2.75 years, average gross exposure
+18.42%, peak 65.5%.
+
+Equal-weight buy-and-hold of the same basket, scaled to the same 18.42%
+average exposure, returned +3.08% at Sharpe 1.19 over the same days. The
+strategy lost to doing nothing on both axes. Holding the basket and holding
+SPY (+2.13%, Sharpe 0.86) both beat it risk-adjusted.
+
+One limitation of the run: the frames were loaded starting 2017-01-01, so
+the 60-bar feature warm-up consumed January to March and the scored period
+begins 2017-03-30 rather than 2017-01-03. Loading the warm-up from 2016
+would have recovered about 60 trading days. That is a second read of the
+hold-out, so it was not done.
+
+The tuning window said 6 of 6 folds profitable, mean Sharpe 1.46, and
+permutation p between 0.005 and 0.04. The hold-out says AUC 0.4925 and a
+Sharpe below buy-and-hold. This is the same shape as the five-minute
+result: strong in tuning, absent out of sample. Two independent attempts -
+different bar size, different horizon, different label, ten times the
+history - reached the same place.
+
+### Conclusion on the whole approach
+
+Technical features computed from OHLCV bars, fed to a gradient-boosted tree,
+thresholded into a long-only position, do not produce a directional edge on
+US large caps at any horizon tested from one hour to one month. The tuning
+periods keep producing Sharpe above 1; the hold-outs keep producing nothing.
+The gap is fitting error, and it has now been measured twice.
+
+What the models do predict is volatility: AUC 0.7145 against 0.5024 for
+direction on the intraday data. That skill has a use that needs no options
+and no directional call - sizing. Tested on the tuning window with the
+crudest possible forecast, trailing realised volatility and no model at all:
+
+| | annualised | volatility | Sharpe | max drawdown |
+|---|---|---|---|---|
+| equal-weight buy-and-hold | +12.39% | 21.66% | 0.65 | -49.08% |
+| scaled by 20-day realised vol, cap 1x | +12.31% | 16.35% | 0.79 | -34.84% |
+| scaled by 20-day realised vol, cap 2x | +17.15% | 22.34% | 0.82 | -39.21% |
+| scaled by 60-day realised vol, cap 1x | +11.62% | 16.74% | 0.74 | -34.10% |
+
+Same return, a quarter less volatility, fifteen points less drawdown, from a
+forecast that took one line of pandas. The project has been discarding the
+one thing its models are good at.
+
+#### The permutation control on the hold-out
+
+| arm | real | permuted median | p |
+|---|---|---|---|
+| within-timestamp, Sharpe | 0.67 | 0.82 | 0.7015 (140/200) |
+| within-timestamp, return | +2.91% | +5.01% | 0.8607 (172/200) |
+| global, Sharpe | 0.67 | 0.90 | 0.7711 (154/200) |
+| global, return | +2.91% | +9.26% | 0.9801 (196/200) |
+
+On the tuning window the model beat its own permutations on Sharpe at p =
+0.005 to 0.04. On the hold-out a random reassignment of the same
+probabilities does *better*: the permuted median return is +5.01% against
+the model's +2.91%, and 140 of 200 random arrangements reached a higher
+Sharpe. The signal is not weak out of sample, it is worse than none.
+
+All six registered criteria fail. Hold-out A is spent; hold-out B (2020-2022)
+stays closed.
