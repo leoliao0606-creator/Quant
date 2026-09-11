@@ -882,3 +882,39 @@ On individual stocks over 2017-2026 it improves Sharpe in only 20 of 55
 and costs 4.23% a year at the median, against 6 of 13 and 2.03% on the
 index funds - single stocks jump, so the rule cuts too much - while the
 drawdown still improves in 55 of 55. It is an index tool.
+
+## The survivorship bias, measured (2026-09-11)
+
+Every single-stock result in this project was benchmarked against an
+equal-weight basket of 66 symbols chosen in 2026 for size and liquidity.
+198 more were downloaded, built the opposite way: companies that were
+large in 2006 and have gone sideways or down since - GE, IBM, INTC, T, VZ,
+F, XRX, Nokia, the 2008 banks, the declining retailers. That gives a
+second basket to measure the first against.
+
+| | symbols | annualised | Sharpe | max drawdown |
+|---|---|---|---|---|
+| 2006-2016, original 66 | 53 | +14.01% | 0.70 | -47.6% |
+| 2006-2016, wide | 241 | +12.39% | 0.64 | -51.3% |
+| 2017-2026, original 66 | 55 | **+19.27%** | 1.01 | -33.9% |
+| 2017-2026, wide | 253 | **+12.35%** | 0.71 | -38.8% |
+| 2017-2026, SPY | 1 | +13.38% | 0.78 | -34.1% |
+
+The old benchmark was inflated by 1.6 points a year over 2006-2016 and
+6.9 over 2017-2026. The recent figure is the larger one because the
+companies a 2026 screen selects are exactly those that led the last
+decade.
+
+It is a lower bound. Seventeen of the 215 requests failed, and the reason
+is the point: WBA taken private, GPS renamed, JWN taken private, X bought
+by Nippon Steel, ANSS by Synopsys, JNPR by HPE, HES by Chevron, MRO by
+ConocoPhillips, K renamed Kellanova. Companies that were large and then
+stopped trading are unreachable from a live data feed, and they are
+precisely the tail this exercise is trying to restore.
+
+One more thing the table says: over 2017-2026 the equal-weight basket of
+253 stocks returned less than SPY and at a lower Sharpe. Equal-weighting a
+wide list of large companies underperformed simply owning the
+capitalisation-weighted index, which is the mega-cap concentration of the
+last decade seen from the other side. For the stated goal, SPY is a better
+starting point than any equal-weight stock basket assembled here.
