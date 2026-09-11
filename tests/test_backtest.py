@@ -410,3 +410,64 @@ class TestPurgedSplits:
         assert train_purged == train_end // 2
         assert train_purged < validation_end
         assert "horizon is long relative to the data" in capsys.readouterr().out
+
+
+def build_daily_rows(prices, probabilities, symbol="AAA", start="2010-01-04"):
+    """One bar per calendar day, the shape a daily-bar backtest sees."""
+    return pd.DataFrame(
+        {
+            "timestamp": [
+                pd.Timestamp(start) + pd.Timedelta(days=index)
+                for index in range(len(prices))
+            ],
+            "symbol": symbol,
+            "close": [float(p) for p in prices],
+            "probability_up": [float(p) for p in probabilities],
+        }
+    )
+
+
+class TestSessionCloseFlattening:
+    """Who decides whether a position survives the night.
+
+    With five-minute bars the last bar of a day is a real session close and the
+    live loop flattens there. With daily bars every bar is the last bar of its
+    day, so applying the same rule would sell every position on the bar that
+    opened it - a holding period of one bar, always, whatever the model said.
+    """
+
+    def test_daily_bars_hold_across_days_by_default(self):
+        # Probability collapses on the last bar, so the exit is the model's
+        # and the holding period measures how long the position was allowed
+        # to live rather than when the simulator gave up on it.
+        rows = build_daily_rows([100.0] * 6, [0.9] * 5 + [0.1])
+        result = simulate_probability_strategy(
+            prediction_rows=rows, entry_probability=0.60, exit_probability=0.40,
+            risk_config=RiskConfig(max_daily_trade_count=None),
+        )
+        trades = result["trades"]
+        assert len(trades) == 1
+        assert trades["holding"].iloc[0] == pd.Timedelta(days=5)
+        assert trades["exit_reason"].iloc[0] != "session_close_flatten"
+
+    def test_intraday_bars_still_flatten_at_the_close(self):
+        rows = build_rows({"AAA": [100.0] * 6}, {"AAA": [0.9] * 6})
+        result = simulate_probability_strategy(
+            prediction_rows=rows, entry_probability=0.60, exit_probability=0.40,
+        )
+        trades = result["trades"]
+        assert (trades["exit_reason"] == "session_close_flatten").all()
+        assert trades["exit_time"].max() == rows["timestamp"].max()
+
+    def test_the_override_wins_over_the_inferred_default(self):
+        rows = build_daily_rows([100.0] * 6, [0.9] * 5 + [0.1])
+        result = simulate_probability_strategy(
+            prediction_rows=rows, entry_probability=0.60, exit_probability=0.40,
+            risk_config=RiskConfig(max_daily_trade_count=None),
+            flatten_at_session_close=True,
+        )
+        # Every bar being a session close, the flatten branch in
+        # generate_trade_decision fires before any entry rule is reached and
+        # returns "session_close_already_flat", so nothing is ever bought.
+        assert result["trade_count"] == 0
+        assert result["peak_gross_exposure"] == 0.0

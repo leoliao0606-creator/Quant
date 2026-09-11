@@ -123,3 +123,97 @@ on it.
 Every number above came from one run of one configuration. Any parameter
 chosen in light of it needs data this project has not read: either a period
 earlier than 2023-02, or forward paper trading.
+
+## What the audit found, and the split it forces (registered 2026-09-10)
+
+The hold-out above was scored with the label the model was trained on:
+"return over the next 12 bars exceeds +0.2%". That label mixes two questions,
+and the model answered only one of them. Scoring the same predictions against
+each question separately:
+
+| question the AUC asks | AUC |
+|---|---|
+| does the return exceed +0.2% (the training label) | 0.6257 |
+| is the return positive at all (direction) | **0.5024** |
+| is the absolute move above its median (volatility) | 0.7145 |
+
+Across probability deciles the up-rate moves from 51.29% to 52.21% and is not
+monotonic, while the mean absolute move grows 6.34x, from 14.96 bp to 94.77
+bp. The rising decile return in the table above is therefore a ~1pp
+directional tilt amplified by a much larger move size, not a directional
+signal. `build_target` in `ibkr_ml/features.py` warns about exactly this;
+the warning turned out to be a description of the result.
+
+Retraining with `--label-mode direction` confirmed it: mean walk-forward AUC
+0.5095 over three folds, mean Sharpe -1.11, one fold profitable out of three.
+Six of the top ten feature importances became symbol one-hot columns and two
+became time-of-day columns - the model, denied the volatility shortcut, fell
+back to fitting per-symbol and per-hour constants.
+
+A second finding constrains where the signal could ever be traded: 15.5% of
+all rows have their 12-bar horizon cross the session close, but 66.1% of the
+top 1% of signals do, because volatility peaks near the close. Those
+overnight signals earn +0.03 bp against +13.81 bp for the intraday ones. The
+existing close buffer already blocks them, which is why gross exposure sat at
+1.06%: two thirds of the model's strongest signals are untradeable by
+construction.
+
+Checks that passed: no lookahead (the only negative shifts in features.py are
+the label at lines 412-413), no train/hold-out overlap, no split artefacts
+(all 11 bars moving more than 15% are 09:30 earnings gaps, and NVDA's
+2023-05-25 close of 37.638 confirms the cache is split-adjusted), and the
+per-trade P&L sums to the reported total return.
+
+One weakness worth stating: the bootstrap in `significance_test.py` resamples
+trades as if independent. Concurrent positions share market exposure, so the
+true interval is wider than the one reported - which only makes p = 0.1877
+less significant, never more.
+
+### Conclusion
+
+At 5-minute bars with a 1-hour horizon, this feature set has no usable
+directional edge. The +1.07% annualised was not bad luck.
+
+### The daily-bar split, fixed before any result is seen
+
+Cost is fixed per round trip; predictable move size grows with holding time.
+An earlier scan pointed the same way - 1-day bars held one week scored AUC
+0.5555 against 0.5164 for 5-minute bars held one hour - on only 1,475 rows,
+which is too few to believe but enough to justify testing properly.
+
+Twenty years of daily bars for all 70 symbols are now cached (5,025 rows per
+symbol from 2006-09-18; V starts 2008-03-19 at its IPO). The periods are
+assigned now, before anything is run:
+
+| period | dates | use |
+|---|---|---|
+| tuning | 2006-09-18 .. 2016-12-31 | every experiment, walk-forward inside it |
+| hold-out A | 2017-01-01 .. 2019-12-31 | scored once, for the one chosen configuration |
+| hold-out B | 2020-01-01 .. 2022-12-31 | reserve, only if A is passed and the design changes |
+| 2023 onward | 2023-01-01 .. today | not a hold-out: the 5-minute work already read this era |
+
+`train_model.py --end-date 2017-01-01` enforces the tuning boundary.
+
+Two benchmarks, not one. The universe was chosen in 2026 for liquidity, so
+running it back to 2006 selects companies that survived and grew: a long-only
+strategy on this basket inherits an upward bias that has nothing to do with
+the model. Beating SGOV is therefore not sufficient here. The registered bar
+is both of:
+
+- annualised return above SGOV's ~4-5%, and
+- Sharpe above equal-weight buy-and-hold of the same 70 symbols over the same
+  period, measured at the strategy's own average gross exposure.
+
+A strategy that clears the first but not the second is a worse way to hold
+stocks, not an edge.
+
+### An engine bug this exposed
+
+`simulate_probability_strategy` flattened every position on the last bar of
+each calendar day, matching the live loop. With daily bars every bar is the
+last bar of its day, and the flatten branch in `generate_trade_decision` sits
+ahead of every entry rule: the backtest would have returned zero trades, not
+short holdings. `flatten_at_session_close` now defaults to reading the median
+bar interval and only flattens intraday bars; three tests in
+`tests/test_backtest.py::TestSessionCloseFlattening` hold the behaviour in
+place.

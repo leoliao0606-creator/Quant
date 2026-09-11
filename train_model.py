@@ -55,6 +55,14 @@ def parse_args():
     )
     parser.add_argument("--max-duration-per-request", default=None)
     parser.add_argument(
+        "--end-date",
+        default=None,
+        help="Drop every bar on or after this date (YYYY-MM-DD). The cache "
+             "holds twenty years of daily bars; an experiment that reads all "
+             "of them leaves no period that can later judge it. Truncating "
+             "here keeps the later years genuinely unseen.",
+    )
+    parser.add_argument(
         "--bar-timezone",
         default=None,
         help=(
@@ -280,6 +288,29 @@ def main() -> None:
         connect=lambda: connect_ib(connection_config),
         fetch_one=fetch_one,
     )
+
+    if args.end_date:
+        import pandas as pd
+
+        from ibkr_ml.features import to_eastern_naive
+
+        cutoff = pd.Timestamp(args.end_date)
+        truncated = {}
+        for symbol, frame in frames.items():
+            stamps = to_eastern_naive(frame["timestamp"])
+            kept = frame[stamps < cutoff]
+            if kept.empty:
+                raise SystemExit(
+                    f"{symbol} 在 {args.end_date} 之前没有数据，无法训练"
+                )
+            truncated[symbol] = kept.reset_index(drop=True)
+        frames = truncated
+        example = next(iter(frames.values()))
+        print(
+            f"Truncated to bars before {args.end_date}: "
+            f"{len(example)} bars per symbol, last "
+            f"{to_eastern_naive(example['timestamp']).max()}"
+        )
 
     effective_bar_timezone = args.bar_timezone
     if args.resample_to:

@@ -383,6 +383,7 @@ def simulate_probability_strategy(
     probability_ceiling: float | None = None,
     entry_percentile: float | None = None,
     adaptive_window: int | None = None,
+    flatten_at_session_close: bool | None = None,
 ):
     """Replay predictions through the live decision rules and score the result.
 
@@ -390,6 +391,14 @@ def simulate_probability_strategy(
     loss limit and the daily trade cap are all active with the same defaults
     the paper trader ships with. Pass the risk_config actually being deployed
     to keep the two in step.
+
+    flatten_at_session_close reproduces the live loop's end-of-day exit, which
+    is correct for intraday bars and wrong for daily ones: with one bar per
+    day every bar is a session close, so every position would be sold on the
+    bar that opened it and no holding could ever last more than one bar. The
+    default reads the bars themselves - flatten when they are intraday, do not
+    when a bar already spans a day or more - so a caller cannot forget to say
+    so. Pass True or False to override that reading.
     """
     pd = _load_pandas()
     np = _load_numpy()
@@ -426,11 +435,17 @@ def simulate_probability_strategy(
     if rows.empty:
         return _empty_result(entry_probability, exit_probability, max_active_positions)
 
+    if flatten_at_session_close is None:
+        deltas = rows["timestamp"].drop_duplicates().sort_values().diff().dropna()
+        flatten_at_session_close = bool(
+            deltas.empty or deltas.median() < pd.Timedelta(days=1)
+        )
+
     # The live loop flattens at flatten_time_et. Bar timestamps carry no
     # timezone, so the last bar of each day stands in for that moment here.
     last_bar_per_day = set(
         rows.groupby(rows["timestamp"].dt.date)["timestamp"].max().tolist()
-    )
+    ) if flatten_at_session_close else set()
 
     simulator = _PortfolioSimulator(
         model_config=model_config,
@@ -457,7 +472,9 @@ def simulate_probability_strategy(
             timestamp=timestamp,
             timestamp_rows=timestamp_rows,
             force_flat=timestamp in last_bar_per_day,
-            bars_to_close=remaining_bars.get(timestamp),
+            bars_to_close=(
+                remaining_bars.get(timestamp) if flatten_at_session_close else None
+            ),
         )
 
     if not simulator.records:
