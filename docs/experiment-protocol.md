@@ -1037,6 +1037,64 @@ hold-outs, the evidence that this project cannot predict which stocks will
 outperform is now about as strong as this dataset can make it. What remains
 predictable here is risk, not return.
 
+## Cross-asset trend following: six configurations, all rejected (2026-09-11)
+
+The last standard approach untried here. Trend timing on SPY alone was
+already rejected as crisis-only and net negative; the open question was
+whether the same rule over many weakly-correlated markets behaves
+differently, since diversification rather than any single market's
+predictability is the mechanism trend followers actually claim.
+
+Universe: 26 index funds in five classes - equities (SPY QQQ IWM DIA EFA
+EEM VEA VWO), bonds (AGG LQD HYG TIP EMB TLT IEF SHY), commodities (GLD
+SLV DBC USO DBA), currencies (UUP FXE FXY), property (VNQ IYR). Signal is
+the sign of the trailing return, rebalanced every 21 days, 5 bps a side,
+1% a year borrow charged on short exposure, sized by the volatility target
+already fixed in volatility_target.py. Run with `trend_multi_asset.py`.
+
+| look-back | direction | annual | Sharpe | drawdown |
+|---|---|---|---|---|
+| 63 | long only | +3.24% | 0.21 | -28.64% |
+| 63 | long/short | +0.52% | -0.05 | -36.35% |
+| 126 | long only | +2.78% | 0.17 | -29.89% |
+| 126 | long/short | +0.82% | -0.02 | -38.14% |
+| 252 | long only | +1.33% | 0.04 | -32.15% |
+| 252 | long/short | -0.19% | -0.12 | -41.80% |
+
+Benchmarks over the same period: SPY +9.08% at 0.47, 60/40 +5.91% at 0.42,
+all 26 equally weighted +3.98% at 0.26. Not one configuration comes close,
+and every long/short variant is worse than its long-only twin.
+
+### Two things the run settled on the way
+
+Inverse-volatility weighting is wrong here, and the reason generalises. It
+gives a 3%-volatility bond fund six times the weight of an 18%-volatility
+equity fund, which is right only if the book can then be levered back to
+the risk it wants. Borrowing costs 6% at IBKR and that was already shown
+to consume the whole advantage, so the book cannot be levered and the
+weighting just parks the money in the lowest-returning assets: the first
+run was 94.6% invested at 7.1% volatility earning +0.09% a year. Equal
+weighting is used instead. This is the same finding as the earlier risk
+parity rejection, arrived at from a different direction.
+
+Shorting is what a trend follower does in a crash, and it works: 2008 goes
+from -21.37% long-only to +4.33% long/short, against SPY's -38.36%. Then
+2009 goes from +3.97% to -17.01%. A crash and the rebound off it are one
+event to a trend follower, and over the pair it loses. That is why the
+long/short column is uniformly worse despite being right about 2008.
+
+### What this does not show
+
+It does not show that trend following fails. It shows that it cannot be
+rebuilt from these 26 ETFs. A real managed-futures book trades 50 to 100
+futures contracts including currency pairs and short-term interest rates,
+pays no management fee on any of them, and often blends several horizons.
+Three limits here are worth naming: IBKR supplies no history before 2016
+for TLT and before 2017 for IEF and SHY, so the long-duration Treasury leg
+- the single most useful crisis hedge - is missing from the window that
+contains the crisis; ETFs charge fees that futures do not; and a 21-day
+rebalance is slower than most of the industry runs.
+
 ## RETRACTED: the momentum result above was look-ahead bias (2026-09-11)
 
 Everything in the section that follows is withdrawn. The alphas in it were
