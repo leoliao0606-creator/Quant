@@ -67,6 +67,19 @@ def main() -> None:
     args = parser.parse_args()
 
     cache = Path(args.cache_dir)
+    # Nothing in the cached CSV or its sidecar says whether dividends are in
+    # the prices, and mixing the two kinds in one directory is silent and
+    # unrecoverable. Stamp the directory, and refuse to mix.
+    cache.mkdir(parents=True, exist_ok=True)
+    marker = cache / ".what_to_show"
+    existing = marker.read_text().strip() if marker.exists() else ""
+    if existing and existing != args.what_to_show:
+        raise SystemExit(
+            f"{cache} 里已经是 {existing} 取的数据，现在要写 "
+            f"{args.what_to_show}，两种混在一个目录里没法分辨。"
+            f"换一个 --cache-dir。")
+    marker.write_text(args.what_to_show + "\n")
+
     pending = []
     for symbol in args.symbols:
         start, rows = first_bar(cache, symbol, args.duration)

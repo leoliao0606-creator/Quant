@@ -1430,3 +1430,132 @@ It does not translate into beating the index. Levering the mix to SPY's
 volatility needs 2.03x, and at IBKR's 6% margin rate that is
 2 x 7.02% - 6% = 8.04%, below SPY's 9.16%. Better risk-adjusted return
 that financing costs undo.
+
+---
+
+## Six defects found by review, and paper trading started (2026-09-11)
+
+Every result in this file up to here was produced by code carrying at
+least one of the six faults below. Four change numbers; two change what
+the runner does. All six were confirmed by re-running, not by reading.
+
+### 1. The backtest and the runner were different strategies
+
+`portfolio_build.py` resized the book every session. `portfolio_trade.py`
+said, in its own docstring, to run monthly. Nobody had ever measured the
+monthly version. Stocks/bonds/TIPS in thirds, dividend-adjusted,
+2006-2026, 5 bps a side:
+
+| how often the scaling is checked | annual | Sharpe | worst drawdown |
+|---|---|---|---|
+| never (hold the allocation) | +5.89% | 0.63 | -22.11% |
+| every session | +5.53% | **0.73** | -14.90% |
+| weekly | +5.53% | **0.72** | -14.96% |
+| fortnightly | +5.32% | 0.68 | -16.07% |
+| monthly | +5.16% | **0.62** | -16.70% |
+
+**At monthly the overlay is worth nothing**: 0.62 against 0.63 for not
+running it at all. Only the drawdown improves. The published 0.73 was the
+daily figure attached to monthly instructions, and the gap is 0.10 of
+Sharpe. The cliff is between weekly and fortnightly, so the fix is to run
+it weekly, which costs 0.01 against every session.
+
+The band barely matters: 3% and 10% are within 0.01 of each other, and a
+10% band actually turns over less (1.7x against 2.1x) for the same Sharpe.
+`--overlay-every` (default 5) and `--overlay-band` now exist so the
+backtest measures what the runner can do.
+
+The second half of this: run after the close and `shift(1)` puts the
+estimate a session behind the backtest, which sizes day D from data
+through D-1 and then collects day D. The runner now drops any bar for a
+session still trading (`drop_incomplete_bar`) and takes the shift out, so
+both use "everything through the last completed session".
+
+### 2. Re-running before a fill placed the order twice
+
+The runner compared target shares against *positions*. Shares sitting in
+an unfilled order are not in the position count, so a second run saw the
+same gap and sent the same order again. It also slept two seconds after a
+sell and started buying, without checking the sell filled - which on a
+rejected sell is a margin loan. Now: it refuses to start when working
+orders exist (`--cancel-open` to clear them), places sells and waits for
+them to be done before any buy goes out, and reports partial fills.
+
+### 3. `--capital 0` disabled the guard it was part of
+
+`capital = args.capital if args.capital else equity` reads 0 as "not
+given". The check beside it tested `args.capital is None`, which 0 is not,
+so passing zero both fell back to the whole account *and* skipped the
+foreign-position check. Negative values produced short targets. Fixed with
+`is None`, and a positive-and-not-above-equity check. Foreign positions
+now include non-stock security types, which the first version skipped
+entirely.
+
+### 4. The dividend fix was never wired to the default
+
+`portfolio_build.py` still defaulted to `data_cache`, the unadjusted
+directory. Running it with no arguments gave stocks/bonds/TIPS + overlay
+at **+3.16%**; the 5.50% in this document required `--cache-dir
+data_cache_adj`. Nothing in a cached CSV or its sidecar says which kind it
+holds. Both directories now carry a `.what_to_show` marker, `fetch_assets.py`
+writes it and refuses to mix the two kinds in one directory, and
+`portfolio_build.py` refuses to run on an unmarked or TRADES cache.
+`trend_multi_asset.py` had the same default and the same fix.
+
+### 5. A data gap was executing trades
+
+AGG has no bars from 2007-07-02 to 2007-10-16, 33 sessions. `static_weights`
+read the hole as "not available", handed AGG's third to SPY and TIP at the
+next rebalance, and handed it back when the data resumed: a two-thirds
+round trip of turnover, paid at 5 bps, caused by nothing that happened in
+the market, sitting on the opening days of the credit crisis. LQD has the
+same 33-day hole and GLD a 2-day one. `load_prices` now carries the last
+price forward across a gap inside a symbol's life and prints what it
+filled. The real move across AGG's gap was +0.17%, so the return error was
+never the problem; the phantom trade was.
+
+### 6. "Beats SGOV" compared two different periods
+
+Cash paid 0.6% over 2006-2016 and 2.2% over 2017-2026. Subtracting today's
+4.3% bill rate from a twenty-year average return subtracts two different
+things. The tables now carry an excess-over-cash column, and the note under
+them says to read that one: stocks/bonds/TIPS + overlay is **+3.99% above
+the cash of its own day**, and whether it beats a 4.3% SGOV depends on
+whether that spread repeats, not on the 5.49% headline.
+
+### Where the headline number landed
+
+With all six fixed - adjusted prices, gaps filled, weekly overlay, 3% band:
+
+| | annual | excess over cash | Sharpe | worst drawdown |
+|---|---|---|---|---|
+| SPY | +11.10% | +9.60% | 0.56 | -55.41% |
+| stocks/bonds/TIPS thirds | +5.92% | +4.42% | 0.63 | -22.09% |
+| the same + overlay | **+5.49%** | **+3.99%** | **0.72** | **-15.21%** |
+| 40/30/15/15 with gold + overlay | +6.84% | +5.34% | 0.76 | -19.48% |
+
+The conclusion survives, but only because the operating instruction
+changed from monthly to weekly. Run monthly, the honest line would have
+been Sharpe 0.62 against 0.63 for doing nothing.
+
+### Paper trading started
+
+2026-09-11, account DUP430517. The account already held 729,752 dollars
+across VOO, QQQM, AMZN, GOOG, PLTR, MSTR and COIN, none of it placed by
+this project - the runner's first act was to refuse to start, because
+sizing 1,049,768 of allocation off net liquidation on top of them is 1.70x
+on margin. Run against a stated 300,000 instead: SPY 130, AGG 1,040, TIP
+942, all filled, 299,004 dollars at 33.3% each, gross 1,028,850 against
+1,049,845 of net liquidation, so no borrowing. A second run traded
+nothing, which is the band working.
+
+IBKR's market data went dark mid-session - error 162, "Trading TWS session
+is connected from a different IP address", which means the account's data
+subscription moved to another login. Historical requests returned zero
+bars and live quotes returned nan while positions, account values and
+order placement all kept working. The runner now falls back to the cache
+when the feed fails (`--prices auto`), still subject to the staleness
+check, and says loudly which symbols came from where.
+
+From here the only new evidence is forward: every historical window in
+this project has been used, except 2020-2022 daily.

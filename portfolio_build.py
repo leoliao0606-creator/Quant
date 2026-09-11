@@ -76,6 +76,31 @@ ALLOCATIONS = {
 GOLD_SCENARIOS = (None, 0.05, 0.025, 0.0)
 
 
+MARKER = ".what_to_show"
+
+
+def check_adjusted(cache_dir):
+    """Refuse to quote a number that silently left dividends out.
+
+    Bars fetched as TRADES carry no distributions, which costs AGG about
+    2.8 points a year and GLD nothing at all, so it does not shift a result
+    evenly - it tilts every comparison towards whatever pays least. The
+    cache records what it was fetched with in a marker file.
+    """
+    path = Path(cache_dir) / MARKER
+    kind = path.read_text().strip() if path.exists() else ""
+    if kind == "ADJUSTED_LAST":
+        return
+    detail = (f"标记文件写着 {kind!r}" if kind
+              else f"缓存里没有 {MARKER} 标记文件，无法确认怎么取的")
+    raise SystemExit(
+        f"{cache_dir} 不是分红调整过的数据：{detail}。\n"
+        f"未复权的成交价不含分红，AGG 会少约 2.8 个百分点/年，GLD 一分不少，"
+        f"所以它不是把结果整体拉低，而是系统性偏袒不分红的资产。\n"
+        f"用 --cache-dir data_cache_adj，或先跑 "
+        f"fetch_assets.py --what-to-show ADJUSTED_LAST 重新下载。")
+
+
 def load_prices(symbols, cache_dir, duration, start, end):
     columns = {}
     for symbol in sorted(set(symbols)):
@@ -90,7 +115,30 @@ def load_prices(symbols, cache_dir, duration, start, end):
             keep &= stamps < pd.Timestamp(end)
         columns[symbol] = pd.Series(frame.loc[keep, "close"].to_numpy(float),
                                     index=stamps[keep].to_numpy())
-    return pd.DataFrame(columns).sort_index()
+    frame = pd.DataFrame(columns).sort_index()
+
+    # A symbol missing bars in the middle of its life is a gap in the feed,
+    # not an absence from the market. AGG is missing 2007-08-31 to
+    # 2007-10-16. Left alone, the rebalance sees it as unavailable, hands
+    # its third to SPY and TIP, and hands it back when the data resumes: a
+    # two-thirds round trip of turnover, charged at 5 bps, caused by
+    # nothing that happened in the market, and sitting on the opening days
+    # of the credit crisis. Carrying the last price forward makes those
+    # days flat instead, and the real move across AGG's gap was +0.17%.
+    for symbol in frame.columns:
+        column = frame[symbol]
+        live = column.notna()
+        if not live.any():
+            raise SystemExit(f"{symbol} 在这段区间里一根K线都没有")
+        span = (frame.index >= live.idxmax()) & (frame.index <= live[::-1].idxmax())
+        holes = int((span & column.isna()).sum())
+        if holes:
+            gap_days = frame.index[span & column.isna()]
+            print(f"  提示: {symbol} 在上市期间缺 {holes} 个交易日"
+                  f"（{gap_days.min().date()} 到 {gap_days.max().date()}），"
+                  f"按最后价格顺延，不当作停牌")
+            frame.loc[span, symbol] = column[span].ffill()
+    return frame
 
 
 def static_weights(allocation, closes, rebalance):
@@ -137,6 +185,25 @@ def overlay_scale(gross, mode):
     return (target / trailing).clip(upper=1.0).fillna(0.0)
 
 
+def step_overlay(scale, every, band):
+    """Only look every `every` sessions, and only move if it is worth moving.
+
+    The backtest used to resize the book every single day while the runner
+    was told to go monthly. Those are different strategies: over 2006-2026
+    the daily version scores Sharpe 0.73 and the monthly one 0.62, against
+    0.63 for not scaling at all. Whatever the runner can actually do has to
+    be what gets measured here.
+    """
+    if every <= 1 and band <= 0:
+        return scale
+    held, current = [], 0.0
+    for i, value in enumerate(scale.to_numpy()):
+        if i % every == 0 and np.isfinite(value) and abs(value - current) > band:
+            current = value
+        held.append(current)
+    return pd.Series(held, index=scale.index)
+
+
 def score(weights, traded, returns, cost_bps, cash_rate):
     invested = weights.sum(axis=1)
     idle = (1.0 - invested).clip(lower=0.0)
@@ -146,8 +213,14 @@ def score(weights, traded, returns, cost_bps, cash_rate):
     excess = net - daily_cash
     equity = (1 + net).cumprod()
     downside = excess[excess < 0]
+    annual = float(equity.iloc[-1] ** (TRADING_DAYS / len(net)) - 1)
     return net, {
-        "ann": float(equity.iloc[-1] ** (TRADING_DAYS / len(net)) - 1),
+        "ann": annual,
+        # The bar is cash, and cash paid 0.6% over 2006-2016 and 4.3% today.
+        # Comparing a twenty-year average return against today's bill rate
+        # compares two different things; the spread over the cash of the
+        # day is the part that could carry forward.
+        "excess": annual - cash_rate,
         "vol": float(net.std(ddof=1) * TRADING_DAYS ** 0.5),
         "sharpe": float(excess.mean() / excess.std(ddof=1) * TRADING_DAYS ** 0.5),
         "sortino": float(excess.mean() / downside.std(ddof=1) * TRADING_DAYS ** 0.5)
@@ -161,12 +234,21 @@ def score(weights, traded, returns, cost_bps, cash_rate):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Static allocations, with and "
                                                  "without the volatility overlay.")
-    parser.add_argument("--cache-dir", default="data_cache")
+    parser.add_argument("--cache-dir", default="data_cache_adj",
+                        help="必须是 ADJUSTED_LAST 取的数据，否则拒绝运行。")
     parser.add_argument("--duration", default="20 Y")
     parser.add_argument("--start", default="2006-09-18")
     parser.add_argument("--end", default="2026-09-11")
     parser.add_argument("--split", default="2017-01-01")
-    parser.add_argument("--rebalance", type=int, default=21)
+    parser.add_argument("--rebalance", type=int, default=21,
+                        help="多少个交易日把配置恢复到目标权重一次。")
+    parser.add_argument("--overlay-every", type=int, default=5,
+                        help="多少个交易日看一次波动率并调整整体仓位。"
+                             "运行器实际做得到什么，这里就该填什么："
+                             "每天 1、每周 5、每月 21。每周和每天几乎一样，"
+                             "每月会把 Sharpe 从 0.73 打回 0.62。")
+    parser.add_argument("--overlay-band", type=float, default=0.03,
+                        help="整体仓位偏离超过这个比例才调整。")
     parser.add_argument("--cost-bps", type=float, default=5.0)
     parser.add_argument("--sgov-rate", type=float, default=0.043,
                         help="What cash earns today, the bar to beat.")
@@ -177,6 +259,7 @@ def main() -> None:
                              "volatility and its correlations intact.")
     args = parser.parse_args()
 
+    check_adjusted(args.cache_dir)
     symbols = [s for weights in ALLOCATIONS.values() for s in weights]
     closes = load_prices(symbols, args.cache_dir, args.duration, args.start, args.end)
     returns = closes.pct_change(fill_method=None)
@@ -189,7 +272,9 @@ def main() -> None:
         for mode, tag in (("fixed", "固定16%"), ("expanding", "扩展窗口")):
             if name != "SPY 100%" and mode == "fixed":
                 continue  # the fixed target is only meaningful on equities
-            scaled = weights.mul(overlay_scale(gross, mode), axis=0)
+            scaled = weights.mul(
+                step_overlay(overlay_scale(gross, mode), args.overlay_every,
+                             args.overlay_band), axis=0)
             books[f"{name} + 目标化({tag})"] = (
                 scaled, scaled.diff().abs().sum(axis=1).fillna(
                     scaled.abs().sum(axis=1)))
@@ -201,15 +286,18 @@ def main() -> None:
         mask = ((closes.index >= pd.Timestamp(start))
                 & (closes.index < pd.Timestamp(end)))
         print(f"\n===== {title}（现金利率 {cash:.1%}，成本 {args.cost_bps:g} bp/边）=====")
-        print(f"  {'组合':<28} {'年化':>8} {'波动':>7} {'Sharpe':>7} {'Sortino':>8} "
-              f"{'回撤':>8} {'仓位':>6} {'换手':>6}")
+        print(f"  {'组合':<28} {'年化':>8} {'超额':>8} {'波动':>7} {'Sharpe':>7} "
+              f"{'Sortino':>8} {'回撤':>8} {'仓位':>6} {'换手':>6}")
         for label, (w, t) in books.items():
             _, s = score(w[mask], t[mask], returns[mask], args.cost_bps, cash)
-            print(f"  {label:<28} {s['ann']:>+7.2%} {s['vol']:>7.2%} "
-                  f"{s['sharpe']:>7.2f} {s['sortino']:>8.2f} {s['dd']:>+7.2%} "
-                  f"{s['exposure']:>6.1%} {s['turnover']:>5.1f}x")
+            print(f"  {label:<28} {s['ann']:>+7.2%} {s['excess']:>+7.2%} "
+                  f"{s['vol']:>7.2%} {s['sharpe']:>7.2f} {s['sortino']:>8.2f} "
+                  f"{s['dd']:>+7.2%} {s['exposure']:>6.1%} {s['turnover']:>5.1f}x")
 
-    print(f"\n[对照：SGOV 今天约 {args.sgov_rate:.1%}，零波动，零回撤]")
+    print(f"\n[对照：SGOV 今天约 {args.sgov_rate:.1%}，零波动，零回撤。")
+    print(f" 要跟它比，看的是「超额」那一列，不是「年化」：现金在 2006-2016 只有")
+    print(f" 0.6%、2017-2026 是 2.2%，拿二十年平均收益去减今天的 {args.sgov_rate:.1%}")
+    print(f" 是拿两个时期的东西相减。能不能带到未来的是超额这个差，不是年化本身。]")
 
     if args.gold_sensitivity:
         print(f"\n[黄金收益敏感性：只改黄金的平均日收益，波动和相关性保持不变]")

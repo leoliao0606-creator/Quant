@@ -198,7 +198,10 @@ def static_book(closes, returns, available, allocation):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Cross-asset trend following.")
-    parser.add_argument("--cache-dir", default="data_cache")
+    parser.add_argument("--cache-dir", default="data_cache_adj",
+                        help="必须是 ADJUSTED_LAST 取的数据。未复权价格不含分红，"
+                             "对不同资产的影响不一样（AGG 约 2.8 个百分点/年，"
+                             "GLD 为零），跨资产比较会被系统性扭曲。")
     parser.add_argument("--duration", default="20 Y")
     parser.add_argument("--start", default="2006-09-18")
     parser.add_argument("--end", default="2026-09-11")

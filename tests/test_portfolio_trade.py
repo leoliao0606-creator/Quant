@@ -1,15 +1,18 @@
 """Tests for the allocation runner.
 
-The one that matters is test_todays_move_cannot_change_todays_size. A
-look-ahead of exactly this shape - a signal read on the same day it starts
-earning - produced a false +6.66% momentum result in this project, and it
-survived a permutation test, a cluster bootstrap and a cost sweep before
-being caught. The cheapest defence is a test that fires a large move into
-the last bar and asserts the size does not react to it.
+The ones that matter are in TestSessionBoundary. A look-ahead - a signal
+read on the same day it starts earning - produced a false +6.66% momentum
+result in this project, and it survived a permutation test, a cluster
+bootstrap and a cost sweep before being caught. The defence here is
+structural: the last completed session must change the size (otherwise the
+rule is a session staler than the backtest, worth 0.10 of Sharpe), and a
+session still trading must not be visible at all.
 """
 
 import sys
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -17,7 +20,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from portfolio_trade import MIN_HISTORY, VOL_WINDOW, book_scale, parse_allocation
+from portfolio_trade import (MIN_HISTORY, SESSION_CLOSE_HOUR, VOL_WINDOW,
+                             book_scale, drop_incomplete_bar, parse_allocation)
+
+
+EASTERN = ZoneInfo("America/New_York")
 
 
 def calm_history(days=800, scale=0.004, seed=7):
@@ -55,9 +62,16 @@ class TestParseAllocation:
 
 class TestBookScale:
     def test_a_calm_book_is_held_in_full(self):
-        scale, trailing, target = book_scale(calm_history(), "expanding", 0.16)
+        # Plain noise leaves trailing and long-run volatility within a
+        # fraction of a percent of each other, so which side of 1.0 the
+        # ratio lands on is an accident of the seed. Damp the recent window
+        # so the book is actually calmer than its own history.
+        returns = calm_history()
+        returns.iloc[-VOL_WINDOW:] *= 0.3
+        scale, trailing, target = book_scale(returns, "expanding", 0.16)
         assert scale == pytest.approx(1.0)
         assert trailing > 0 and target > 0
+        assert trailing < target
 
     def test_a_book_moving_more_than_usual_is_cut(self):
         returns = calm_history()
@@ -78,23 +92,29 @@ class TestBookScale:
         scale, _, _ = book_scale(returns, "expanding", 0.16)
         assert scale == pytest.approx(1.0)
 
-    def test_todays_move_cannot_change_todays_size(self):
-        """The whole point. A crash today must not resize the book today."""
+    def test_the_last_completed_session_does_change_the_size(self):
+        """The caller hands in completed sessions only, so the last one
+        counts. Shifting it away is what made an earlier version size off
+        stale data."""
         returns = calm_history()
         baseline, _, _ = book_scale(returns, "expanding", 0.16)
         shocked = returns.copy()
         shocked.iloc[-1] = -0.25
         after, _, _ = book_scale(shocked, "expanding", 0.16)
-        assert after == pytest.approx(baseline)
+        assert after < baseline
 
-    def test_yesterdays_move_does_change_todays_size(self):
-        """The other half: the rule has to react, one day later."""
+    def test_a_session_beyond_the_end_cannot_reach_the_estimate(self):
+        """The protection against look-ahead lives in drop_incomplete_bar,
+        not in book_scale: what is never passed in cannot be read."""
         returns = calm_history()
         baseline, _, _ = book_scale(returns, "expanding", 0.16)
-        shocked = returns.copy()
-        shocked.iloc[-2] = -0.25
-        after, _, _ = book_scale(shocked, "expanding", 0.16)
-        assert after < baseline
+        extended = pd.concat([returns, pd.Series(
+            [-0.25], index=[returns.index[-1] + pd.Timedelta(days=3)])])
+        trimmed, dropped = drop_incomplete_bar(
+            extended, datetime(2020, 1, 1, 18, tzinfo=EASTERN))
+        assert dropped
+        after, _, _ = book_scale(trimmed, "expanding", 0.16)
+        assert after == pytest.approx(baseline)
 
     def test_the_fixed_target_uses_the_number_it_is_given(self):
         returns = calm_history()
@@ -112,3 +132,47 @@ class TestBookScale:
         flat = pd.Series(0.0, index=pd.bdate_range("2020-01-01", periods=800))
         with pytest.raises(SystemExit):
             book_scale(flat, "expanding", 0.16)
+
+
+class TestSessionBoundary:
+    """A bar for a session that is still trading is a few hours of data
+    wearing a day's clothes. It reads calm, so it would inflate the size
+    exactly when the market is moving."""
+
+    def frame(self, last_day):
+        index = pd.bdate_range(end=last_day, periods=30)
+        return pd.DataFrame({"SPY": np.linspace(100.0, 130.0, 30)}, index=index)
+
+    def test_a_bar_dated_today_is_dropped_before_the_close(self):
+        prices = self.frame(pd.Timestamp("2026-09-11"))
+        kept, dropped = drop_incomplete_bar(
+            prices, datetime(2026, 9, 11, 13, 22, tzinfo=EASTERN))
+        assert dropped
+        assert kept.index[-1] == pd.Timestamp("2026-09-10")
+
+    def test_a_bar_dated_today_is_kept_after_the_close(self):
+        prices = self.frame(pd.Timestamp("2026-09-11"))
+        kept, dropped = drop_incomplete_bar(
+            prices, datetime(2026, 9, 11, SESSION_CLOSE_HOUR, 5, tzinfo=EASTERN))
+        assert not dropped
+        assert kept.index[-1] == pd.Timestamp("2026-09-11")
+
+    def test_yesterdays_bar_is_always_kept(self):
+        prices = self.frame(pd.Timestamp("2026-09-10"))
+        kept, dropped = drop_incomplete_bar(
+            prices, datetime(2026, 9, 11, 9, 31, tzinfo=EASTERN))
+        assert not dropped
+        assert len(kept) == len(prices)
+
+    def test_a_bar_dated_in_the_future_is_dropped(self):
+        prices = self.frame(pd.Timestamp("2026-09-14"))
+        kept, dropped = drop_incomplete_bar(
+            prices, datetime(2026, 9, 11, 17, 0, tzinfo=EASTERN))
+        assert dropped
+
+    def test_an_empty_frame_does_not_raise(self):
+        empty = pd.DataFrame({"SPY": []}, index=pd.DatetimeIndex([]))
+        kept, dropped = drop_incomplete_bar(
+            empty, datetime(2026, 9, 11, 17, 0, tzinfo=EASTERN))
+        assert not dropped
+        assert len(kept) == 0
