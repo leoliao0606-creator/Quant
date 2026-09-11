@@ -418,3 +418,51 @@ Sharpe. The signal is not weak out of sample, it is worse than none.
 
 All six registered criteria fail. Hold-out A is spent; hold-out B (2020-2022)
 stays closed.
+
+### Volatility targeting, tested against its own control (2026-09-10)
+
+The claim that the project should pivot to volatility needed the same
+treatment as everything else, so it got a control: compare a
+volatility-scaled book not against the unlevered basket but against a
+*constant* position of the same average size. Scaling exposure changes
+return and volatility together and leaves Sharpe alone, so any comparison
+that lets average exposure move is measuring leverage, not timing.
+
+All figures net of 5 bps per side on turnover.
+
+| period | scaled Sharpe | constant-exposure control | difference | drawdown scaled vs control |
+|---|---|---|---|---|
+| 2006-2016, 20-day, cap 1x | 0.78 | 0.64 | **+0.139** | -35.0% vs -46.1% |
+| 2006-2016, 20-day, cap 2x | 0.80 | 0.64 | **+0.151** | -39.6% vs -64.1% |
+| 2006-2016, 60-day, cap 2x | 0.73 | 0.64 | +0.083 | -36.4% vs -61.8% |
+| 2017-2019, 20-day, cap 1x | 1.39 | 1.36 | +0.024 | -13.1% vs -16.5% |
+| 2017-2019, 20-day, cap 2x | 1.42 | 1.36 | +0.056 | -17.1% vs -23.3% |
+| 2017-2019, 60-day, cap 2x | 1.28 | 1.36 | **-0.088** | -18.3% vs -20.2% |
+
+The Sharpe gain is the 2008 crash. Without a crisis in the window it falls
+to +0.02 to +0.06 and one variant is negative. The drawdown reduction
+survives in both periods and is the honest benefit.
+
+One idea tested and rejected: weighting each stock by the inverse of its own
+volatility, which is where a per-stock forecast would help most. It *lowers*
+Sharpe, 0.64 to 0.54, because it tilts toward low-volatility names and in a
+basket selected in 2026 for size and liquidity those are the laggards.
+Combining it with portfolio-level targeting is worse than targeting alone
+(0.69 against 0.80). The per-stock volatility skill the models have does not
+convert into a better portfolio this way.
+
+### Where this leaves the goal
+
+Without alpha, "beat SGOV" reduces to "take equity risk", and the margin is
+proportional to the risk taken. Sizing a volatility-targeted basket to 5%
+annual volatility returns about +3.5% over 2006-2016 and much more over
+2017-2019 - the difference being the equity risk premium realised in each
+window, which is the thing that cannot be forecast. Volatility targeting
+improves the shape of that trade-off, mostly by cutting the worst drawdown,
+and creates no return of its own.
+
+Two directional attempts have now failed on untouched data. The remaining
+honest options are: accept equity risk at a chosen size with volatility
+targeting for drawdown control and no model at all; or find information that
+is not in the price series, which is not obtainable from the IBKR bar feed
+this project uses.
