@@ -201,6 +201,15 @@ def main() -> None:
                         help="Trading days to hold. 63 is one earnings quarter.")
     parser.add_argument("--max-positions", type=int, default=10)
     parser.add_argument("--warmup-events", type=int, default=200)
+    parser.add_argument(
+        "--score-from",
+        default=None,
+        help="Detect events from --start but only trade and score from this "
+             "date. The rank floor compares an event against events already "
+             "seen, so a short window would calibrate it on a handful of "
+             "events while a long one calibrates it on years. Scoring a later "
+             "slice of one continuous history keeps that comparable.",
+    )
     parser.add_argument("--transaction-cost-bps", type=float, default=5.0)
     parser.add_argument("--draws", type=int, default=200,
                         help="Permutation draws. 0 skips the control.")
@@ -228,6 +237,9 @@ def main() -> None:
                          args.move_threshold, args.volume_threshold, args.spacing)
     events = add_trailing_rank(events, args.warmup_events)
     qualified = events.dropna(subset=["rank"]).query("rank >= @args.rank_floor")
+    score_from = pd.Timestamp(args.score_from) if args.score_from else None
+    if score_from is not None:
+        qualified = qualified[qualified["day"] >= score_from]
     if qualified.empty:
         raise SystemExit("没有事件通过门槛")
 
@@ -239,19 +251,37 @@ def main() -> None:
           f"合格 {len(qualified):,} 个")
 
     entries = [(int(row.position) + 1, row.symbol) for row in qualified.itertuples()]
-    weights = build_weights(entries, closes, args.hold, args.max_positions)
-    actual = score(weights, returns, args.transaction_cost_bps)
+
+    # Entry positions index the full history, so weights must always be built
+    # against it; only the scoring window is cut. Slicing `closes` before
+    # build_weights silently put every entry out of range, which showed up as
+    # a permutation control returning exactly 0.00% on every draw.
+    def evaluate(chosen):
+        built = build_weights(chosen, closes, args.hold, args.max_positions)
+        if score_from is None:
+            return built, score(built, returns, args.transaction_cost_bps)
+        window = closes.index >= score_from
+        return built[window], score(built[window], returns[window],
+                                    args.transaction_cost_bps)
+
+    if score_from is not None:
+        print(f"仅对 {closes.index[closes.index >= score_from].min().date()} 起计分"
+              f"（事件检测与阈值使用 {start.date()} 起的全部历史）")
+    weights, actual = evaluate(entries)
+    scored_returns = returns[closes.index >= score_from] if score_from is not None else returns
+    scored_basket = basket[closes.index >= score_from] if score_from is not None else basket
+    scored_closes = closes[closes.index >= score_from] if score_from is not None else closes
 
     print(f"\n结果（成本 {args.transaction_cost_bps:g} bp/单边，持有 {args.hold} 天，"
           f"{args.max_positions} 个仓位槽）:")
     describe(actual, "事件漂移组合")
-    available = closes.notna()
+    available = scored_closes.notna()
     equal = available.div(available.sum(axis=1), axis=0)
-    describe(score(equal * actual["exposure"], returns, args.transaction_cost_bps),
+    describe(score(equal * actual["exposure"], scored_returns, args.transaction_cost_bps),
              f"等权篮子，固定 {actual['exposure']:.1%} 敞口")
-    describe(score(equal, returns, args.transaction_cost_bps), "等权篮子，满仓")
+    describe(score(equal, scored_returns, args.transaction_cost_bps), "等权篮子，满仓")
 
-    fit = regress_on_basket(actual["net"], basket, weights)
+    fit = regress_on_basket(actual["net"], scored_basket, weights)
     if fit:
         print(f"\n对篮子回归（{fit['days']} 个持仓日）:")
         print(f"  贝塔 {fit['beta']:.3f}   年化阿尔法 {fit['alpha']:+.2%}   "
@@ -264,8 +294,7 @@ def main() -> None:
         annualised, sharpes = [], []
         for _ in range(args.draws):
             shuffled = [(position, pool[rng.integers(len(pool))]) for position, _ in entries]
-            drawn = score(build_weights(shuffled, closes, args.hold, args.max_positions),
-                          returns, args.transaction_cost_bps)
+            _, drawn = evaluate(shuffled)
             annualised.append(drawn["annualised"])
             sharpes.append(drawn["sharpe"])
         annualised, sharpes = np.array(annualised), np.array(sharpes)
