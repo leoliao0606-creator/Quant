@@ -628,3 +628,38 @@ project does not have. Any figure here that appears to beat the S&P 500 by
 holding the 66-symbol basket should be read as the survivorship bias it is:
 that basket returned +12.38% against SPY's +5.25% over 2006-2016 with no
 strategy at all.
+
+### A better volatility forecast does not make a better portfolio (2026-09-11)
+
+Targeting runs on the crudest forecast there is, the trailing 20-day
+standard deviation, so the obvious improvement is a better forecaster.
+Five were compared on 2006-2016 - 20-day, 60-day, EWMA at RiskMetrics'
+lambda, a 20/60 blend, and HAR-RV, which regresses the coming month's
+volatility on the last day, week and month of it and is the benchmark most
+published models fail to beat. HAR-RV was chosen: best Sharpe on SPY (0.53
+against 0.47), within 0.05 on QQQ, and drawdowns of -27.9% and -26.1%
+against roughly -41% for everything else, because it forecasts the next
+month rather than measuring the last one and so de-risks before the move.
+
+On 2017-2026 the choice did not hold:
+
+| SPY 2017-2026 | annualised | Sharpe | max drawdown |
+|---|---|---|---|
+| buy and hold | +13.38% | 0.78 | -34.10% |
+| 20-day realised, cap 1.0 | +11.80% | **0.86** | **-21.70%** |
+| HAR-RV, cap 1.5 (chosen) | +13.74% | 0.84 | -24.37% |
+
+| QQQ 2017-2026 | annualised | Sharpe | max drawdown |
+|---|---|---|---|
+| buy and hold | +20.23% | 0.92 | -35.62% |
+| 20-day realised, cap 1.0 | +18.26% | **0.99** | **-30.80%** |
+| HAR-RV, cap 1.5 (chosen) | +19.17% | 0.93 | -33.96% |
+
+HAR-RV is the better volatility forecaster and the worse position sizer.
+For deciding how much to hold, the crude window already carries what
+matters.
+
+The same table is the first positive result in this project to hold across
+two separate periods with the parameter fixed in the first: 20-day
+targeting improves Sharpe and cuts the worst drawdown on both instruments,
+over ten years that include the 2020 crash and the 2022 bear market.
