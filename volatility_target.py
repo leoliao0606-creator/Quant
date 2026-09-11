@@ -20,17 +20,28 @@ Every constant is set from outside the data:
                calm stretches drops SPY's 2006-2016 Sharpe from 0.47 to
                0.27, because calm stretches are what precede crashes.
 
-Measured against buy-and-hold, 5 bps per side, idle cash at 4.3%:
+What it does, across thirteen index funds and two periods, with Sharpe
+measured on return above cash at each period's own bill rate:
 
-    SPY 2006-2016   Sharpe 0.35 -> 0.50   worst drawdown -56.5% -> -36.0%
-    SPY 2017-2026   Sharpe 0.78 -> 0.90   worst drawdown -34.1% -> -19.7%
-    QQQ 2006-2016   Sharpe 0.60 -> 0.75   worst drawdown -53.5% -> -31.3%
-    QQQ 2017-2026   Sharpe 0.92 -> 1.09   worst drawdown -35.6% -> -21.4%
+    worst drawdown   improved in 26 of 26, median 17 points
+    Sharpe           improved in 12 of 13 over 2006-2016 (median +0.08)
+                     and 6 of 13 over 2017-2026 (median -0.007)
+    annual return    about -0.3% over 2006-2016, about -2.0% over 2017-2026
 
-It gives up half a point to three points of annual return for a drawdown
-about a third smaller. It is not alpha and will not beat the index on
-return; levered to matched volatility with borrowing charged at 6%, the
-return advantage is 0.43 points a year at identical Sharpe.
+So: a drawdown tool, not a Sharpe tool. The risk-adjusted gain appears in
+the window containing a prolonged bear market and vanishes in the one
+without, the same shape trend timing has, but the cost of carrying it is
+two points a year rather than six to nine and it never goes fully flat.
+
+Sharpe must be computed on excess return here. Cash has no volatility, so
+mean over standard deviation of a series that includes interest rises
+whenever exposure falls - a book entirely in cash scores infinity. An
+earlier version of this note quoted 0.78 -> 0.90 on SPY from that mistake;
+against cash the same pair is 0.54 -> 0.57.
+
+It will not beat the index on return. Levered to matched volatility with
+borrowing charged at IBKR's 6%, the advantage is 0.43 points a year at
+identical Sharpe.
 """
 
 from __future__ import annotations
@@ -73,15 +84,26 @@ def apply_band(weights, band):
 
 
 def backtest(returns, weights, cost_bps=5.0, cash_rate=0.043):
+    """Total return, and a Sharpe measured on the return above cash.
+
+    Sharpe has to be computed on excess return here, not on total return.
+    Cash has no volatility, so mean/standard-deviation of a series that
+    includes interest rises whenever exposure falls - a book left entirely
+    in cash would score infinity. Volatility targeting holds 80 to 93% on
+    average against buy-and-hold's 100%, so scoring total return would
+    hand it an advantage it did not earn.
+    """
     turnover = weights.diff().abs().fillna(weights.abs())
     idle = (1.0 - weights).clip(lower=0.0)
+    daily_cash = cash_rate / TRADING_DAYS
     net = (weights * returns - turnover * cost_bps / 10000.0
-           + idle * cash_rate / TRADING_DAYS).dropna()
+           + idle * daily_cash).dropna()
+    excess = net - daily_cash
     equity = (1 + net).cumprod()
     return {
         "annualised": float(equity.iloc[-1] ** (TRADING_DAYS / len(net)) - 1),
         "volatility": float(net.std(ddof=1) * TRADING_DAYS ** 0.5),
-        "sharpe": float(net.mean() / net.std(ddof=1) * TRADING_DAYS ** 0.5),
+        "sharpe": float(excess.mean() / excess.std(ddof=1) * TRADING_DAYS ** 0.5),
         "max_drawdown": float((equity / equity.cummax() - 1).min()),
         "exposure": float(weights.mean()),
         "turnover": float(turnover.mean() * TRADING_DAYS),

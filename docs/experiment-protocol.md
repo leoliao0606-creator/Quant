@@ -740,3 +740,40 @@ finished, and the rule was already smaller.
 Twenty-six instrument-period pairs, drawdown improved in every one, mean
 improvement about 18 points. That is the strongest evidence in this
 project, and it is evidence for a risk overlay rather than for a forecast.
+
+### Correction: the Sharpe gain was mostly an accounting artefact
+
+The breadth table above reports Sharpe improving in 23 of 26 pairs. That
+number is wrong and the reason is worth recording.
+
+Sharpe was computed as mean over standard deviation of the portfolio's
+total return, with idle cash credited at 4.3%. Cash has no volatility, so
+adding interest to a series raises its mean without touching its
+denominator: a book held entirely in cash scores infinity. Volatility
+targeting holds 80 to 93% on average against buy-and-hold's 100%, so it
+was collecting a bonus for the cash it happened to hold rather than for
+anything it did.
+
+Recomputed on return above cash, the picture changes:
+
+| | Sharpe improved | median change | annual return | drawdown improved |
+|---|---|---|---|---|
+| 2006-2016, bills at 0.6% | 12 of 13 | +0.080 | -0.31% | 13 of 13 |
+| 2017-2026, bills at 2.2% | 6 of 13 | -0.007 | -2.03% | 13 of 13 |
+
+The bill rate matters because the targeted book's excess return is exactly
+`weight x (buy-and-hold excess) - costs`: a higher assumed rate shrinks
+what is being scaled, so giving up exposure costs more. Assuming today's
+4.3% across a decade when bills paid nearly nothing understates the
+strategy; assuming zero overstates it. Across 0% to 4.3% the count runs
+from 20 of 26 down to 15 of 26 and the median gain from +0.053 to +0.008.
+
+What survives every version of the calculation is the drawdown: improved
+in 26 of 26 pairs and in all twenty parameter settings tested, by a median
+of 17 points.
+
+So the honest statement is narrower than the one above it. Volatility
+targeting is a drawdown tool. Its risk-adjusted gain is concentrated in
+the window containing a prolonged bear market and is absent from the one
+without - the same shape as trend timing - but it costs two points a year
+rather than six to nine, and it never goes fully flat.
