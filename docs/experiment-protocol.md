@@ -525,3 +525,106 @@ one continuous event history so the rank floor stays calibrated, alpha is
 
 A false positive produced by testing many configurations, found by asking
 what the signal was supposed to be and then checking whether it was that.
+
+## Five more approaches, and the one that survives (2026-09-11)
+
+### Cross-sectional signals: reversed out of sample
+
+The feature set had never reached past 24 bars, so the best-documented
+equity anomaly - twelve-month momentum skipping the most recent month - had
+never been tested. It was registered as the primary hypothesis and five
+other cross-sectional signals were run alongside it, so that picking the
+best afterwards would be visibly not what happened. Top 13 of 66 names,
+rebalanced every 21 days, 5 bps per side, alpha measured against the
+equal-weight basket.
+
+| signal | tuning alpha | t | 2017-2019 alpha | t |
+|---|---|---|---|---|
+| momentum 12-1 (primary) | +4.67% | 1.53 | **-7.01%** | -1.32 |
+| momentum 6-1 | +2.00% | 0.68 | -4.97% | -0.92 |
+| momentum 12-0 | +5.97% | 1.92 | -4.07% | -0.76 |
+| short-term reversal | -9.03% | -2.76 | +1.50% | +0.29 |
+| low volatility | -2.95% | -1.46 | -1.94% | -0.69 |
+| trend, price vs 200-day mean | +7.04% | 2.17 | +2.81% | 0.50 |
+
+On the tuning window the pattern was coherent: every momentum-like signal
+positive, every contrarian one negative, which reads as more than noise.
+Out of sample all three momentum alphas turn negative and reversal turns
+positive. The signs flip. Coherence within one window is not evidence of
+persistence, and treating it as such was a mistake.
+
+### Overlays on an index, where survivorship cannot reach
+
+Every result above is computed on 66 symbols chosen in 2026 for size, so no
+statistic inside that set separates an effect from the selection. SPY and
+QQQ have no such problem, and neither overlay selects anything.
+
+SPY, 2006-09 to 2026-09, cash credited at 4.3%:
+
+| | annualised | volatility | Sharpe | max drawdown |
+|---|---|---|---|---|
+| buy and hold | +9.16% | 19.51% | 0.55 | -56.46% |
+| 200-day trend filter | +6.62% | 11.37% | 0.62 | -18.85% |
+| volatility targeting | **+9.39%** | 14.90% | **0.68** | -40.09% |
+| both | +6.91% | 11.10% | 0.66 | -17.59% |
+
+The trend filter halves the drawdown and costs two and a half points of
+return over twenty years; it earns its keep only in 2020-2022 (Sharpe 0.77
+against 0.34) and is expensive in every calm stretch. Volatility targeting
+improves Sharpe in five of eight period-instrument pairs, ties one, loses
+two, and raises the return slightly rather than cutting it.
+
+### The overnight split: real, and untradeable
+
+Almost all of the long-run equity return arrives between the close and the
+next open. Over twenty years SPY's overnight leg returns +5.46% at Sharpe
+0.51 and its intraday leg +3.52% at Sharpe 0.31; for QQQ the split is
++10.19% at 0.82 against +4.81% at 0.35.
+
+Holding only overnight means two trades a day, 504 round trips a year. At 1
+bp per side SPY's +5.46% becomes +0.27%; at 2 bps it becomes -4.66%. QQQ
+survives 1 bp at +4.78% and dies at 2 bps. The effect is real and this
+route to it is not.
+
+It does explain something retrospectively: the five-minute work was hunting
+direction inside the session, which over twenty years carries a Sharpe of
+0.31 on SPY and almost no drift.
+
+### Volatility targeting, held to the same standard
+
+It is the only thing left, so it got the treatment that killed the others.
+
+| | SPY | QQQ |
+|---|---|---|
+| buy and hold Sharpe | 0.547 | 0.762 |
+| volatility targeted | 0.658 | 0.867 |
+| constant position, same average exposure | 0.547 | 0.762 |
+| **same weights in random order** | **0.460 (p = 0.0020)** | **0.673 (p = 0.0020)** |
+| block bootstrap improvement | +0.072 [-0.024, +0.180] | +0.063 [-0.017, +0.158] |
+
+The shuffled-weight control is the informative one. It keeps average
+exposure, turnover and the whole distribution of position sizes, and breaks
+only the pairing of a small position with a high volatility forecast.
+Breaking it costs 0.20 of Sharpe, and none of 500 shuffles reached the real
+number. The mechanism is real.
+
+The block bootstrap - 21-day blocks, so the volatility clustering the
+strategy feeds on is preserved rather than destroyed - puts the improvement
+at +0.06 to +0.07 with about a tenth of resampled paths showing none. Real,
+modest, and consistent with what the literature reports.
+
+### Where the project stands
+
+Six approaches tested against untouched data or a proper control: machine
+learning on intraday bars, the same on daily bars, post-earnings drift,
+cross-sectional momentum and its relatives, trend timing, and the overnight
+split. None produces alpha that survives. One risk-shaping technique does
+survive, and it forecasts nothing.
+
+Without alpha, beating SGOV reduces to taking equity risk at a chosen size,
+and volatility targeting improves the shape of that trade by about 0.1 of
+Sharpe. Beating the S&P 500 needs either more risk or information this
+project does not have. Any figure here that appears to beat the S&P 500 by
+holding the 66-symbol basket should be read as the survivorship bias it is:
+that basket returned +12.38% against SPY's +5.25% over 2006-2016 with no
+strategy at all.
