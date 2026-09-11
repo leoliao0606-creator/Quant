@@ -918,3 +918,93 @@ wide list of large companies underperformed simply owning the
 capitalisation-weighted index, which is the mega-cap concentration of the
 last decade seen from the other side. For the stated goal, SPY is a better
 starting point than any equal-weight stock basket assembled here.
+
+## Momentum, retested on a universe that contains losers (2026-09-11)
+
+Cross-sectional momentum was rejected earlier on the 66-symbol universe:
+positive over 2006-2016 and negative out of sample. With roughly 250
+symbols the four cells read differently.
+
+| universe | 2006-2016 alpha (t) | 2017-2026 alpha (t) |
+|---|---|---|
+| 66 symbols picked in 2026 | +5.97% (1.92) | -4.07% (-0.76) |
+| ~250 symbols incl. laggards | +1.10% (0.39) | **+6.66% (1.76)** |
+
+One mechanism fits all four: momentum works by avoiding losers, and a
+universe assembled in 2026 from the winners contains none to avoid. The
+earlier rejection was reading the absence of losers as the absence of an
+effect. The weak 2006-2016 figure is the documented momentum crash - 2008
+cost 10.7 points of alpha and 2009 another 7.4 - and the other eight years
+of that window average about +2.7%.
+
+The 2017-2026 result passes the battery that rejected the earnings work:
+
+  costs        alpha +6.66% at 5 bps a side, +5.85% at 20 bps, turnover
+               5.4x a year
+  years        8 of 10 positive, the exceptions 2017 (-6.6%) and 2021
+               (-13.0%)
+  clustering   300 symbol bootstrap draws, alpha median +6.73%, 5-95%
+               [+4.69%, +8.36%], none negative, and Sharpe below the
+               basket in none
+
+Against that: t = 1.76 is not significant on its own, the same universe
+gives +1.10% in the earlier window, and the cell was found by looking at
+four. Over twenty years the honest expectation is nearer +3% than +6.7%,
+with crash risk attached.
+
+### Momentum and the volatility overlay together
+
+The two survivors fail in opposite conditions. Momentum's crash is a
+violent rebound off a bottom, which is when the overlay is holding a third
+of a position, so the overlay should remove momentum's worst years - a
+prediction, not a parameter.
+
+| 2006-2026, ~250 symbols | annualised | volatility | Sharpe | drawdown |
+|---|---|---|---|---|
+| equal-weight basket | +12.44% | 20.69% | 0.60 | -51.31% |
+| momentum only | +14.78% | 20.77% | 0.70 | -48.10% |
+| **momentum + overlay** | +12.39% | 14.90% | **0.76** | **-30.34%** |
+
+| crash years | basket | momentum | combined |
+|---|---|---|---|
+| 2008 | -31.35% | -33.04% | **-18.91%** |
+| 2009 | +46.95% | +17.45% | +14.24% |
+| 2021 | +29.83% | +25.81% | +14.15% |
+
+Half right. The overlay removed 14 points of the 2008 loss; it could not
+help in 2009, where momentum captured +17.45% of the basket's +46.95%
+because the selection was wrong, not the sizing.
+
+Read against its own universe - the only fair comparison, since both arms
+share it - the combination delivers the same return at Sharpe 0.76 against
+0.60 and a drawdown of -30% against -51%.
+
+The absolute figure is not trustworthy. The 253-symbol basket returned
++12.44% over twenty years against SPY's +9.16%, and that gap is the
+survivorship bias. The relative improvement survives it because both arms
+hold the same names; the level does not. Trading this forward needs a
+universe defined by a rule - index membership - rather than by a list
+written in 2026.
+
+## Multi-asset diversification, finally testable
+
+Bond, gold and commodity funds were downloaded today; every earlier
+portfolio result was equities against cash because the cache held nothing
+else. Monthly rebalancing, Sharpe on return above cash.
+
+| 2006-2026 | annualised | volatility | Sharpe | drawdown |
+|---|---|---|---|---|
+| SPY | +9.16% | 19.51% | 0.47 | -56.46% |
+| SPY + volatility overlay | +8.58% | 13.66% | 0.56 | -36.81% |
+| **SPY + AGG + GLD, equal** | +7.02% | 9.60% | **0.60** | **-24.30%** |
+| SPY + AGG, equal | +4.93% | 10.13% | 0.38 | -32.15% |
+| seven assets, equal | +5.17% | 14.93% | 0.31 | -44.33% |
+
+Stocks, bonds and gold in thirds is the best simple mix in both
+sub-periods. Inverse-volatility weighting is worse everywhere because it
+loads on bonds, which paid little across this particular twenty years.
+
+It does not translate into beating the index. Levering the mix to SPY's
+volatility needs 2.03x, and at IBKR's 6% margin rate that is
+2 x 7.02% - 6% = 8.04%, below SPY's 9.16%. Better risk-adjusted return
+that financing costs undo.
