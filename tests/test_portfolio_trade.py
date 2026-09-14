@@ -20,8 +20,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from portfolio_trade import (MIN_HISTORY, SESSION_CLOSE_HOUR, VOL_WINDOW,
-                             book_scale, drop_incomplete_bar, parse_allocation)
+from conftest import (FakeContract, FakeIB, FakeOrder, FakeOrderStatus,
+                      FakeTrade, SequencedOrderStatus)
+from portfolio_trade import (CANCEL_REFUSED_CODES, MIN_HISTORY,
+                             SESSION_CLOSE_HOUR, VOL_WINDOW, book_scale,
+                             cancel_and_wait, describe_trades,
+                             drop_incomplete_bar, market_is_open,
+                             parse_allocation, parse_sessions,
+                             split_working_orders)
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -176,3 +182,251 @@ class TestSessionBoundary:
             empty, datetime(2026, 9, 11, 17, 0, tzinfo=EASTERN))
         assert not dropped
         assert len(kept) == 0
+
+
+class TestWorkingOrders:
+    """Shares in an unfilled order are not in the position count.
+
+    This is the defect that placed the same order twice: a re-run before the
+    fill saw the same gap. The guard has to see orders placed by any client
+    id, because connect_ib raises the id by one whenever a connection attempt
+    fails, and it has to leave the rest of the account alone, because the
+    account holds positions this project did not put there.
+    """
+
+    allocation = {"SPY": 1 / 3, "AGG": 1 / 3, "TIP": 1 / 3}
+
+    def trade(self, symbol, status="Submitted", sec_type="STK", action="BUY",
+              quantity=100, filled=0.0):
+        order_status = FakeOrderStatus(status)
+        order_status.filled = filled
+        return FakeTrade(FakeContract(symbol, sec_type),
+                         FakeOrder(1, "MKT", action, quantity), order_status)
+
+    def test_a_working_order_on_an_allocation_symbol_is_flagged(self):
+        mine, others = split_working_orders([self.trade("SPY")],
+                                            self.allocation)
+        assert [t.contract.symbol for t in mine] == ["SPY"]
+        assert others == []
+
+    def test_a_working_order_on_anything_else_is_not_flagged(self):
+        # One manual limit order on an unrelated holding must not stop the
+        # weekly rebalance: it does not change the share count of SPY/AGG/TIP.
+        mine, others = split_working_orders([self.trade("PLTR")],
+                                            self.allocation)
+        assert mine == []
+        assert [t.contract.symbol for t in others] == ["PLTR"]
+
+    def test_a_filled_order_is_not_working(self):
+        mine, others = split_working_orders(
+            [self.trade("SPY", "Filled", filled=100.0)], self.allocation)
+        assert mine == [] and others == []
+
+    def test_a_cancelled_order_is_not_working(self):
+        for status in ("Cancelled", "ApiCancelled", "Inactive"):
+            mine, others = split_working_orders(
+                [self.trade("SPY", status)], self.allocation)
+            assert mine == [], status
+
+    def test_a_partially_filled_order_is_still_working(self):
+        # The dangerous one: 40 of 100 shares are in the position count and
+        # 60 are not, so the gap this run computes is real but the order that
+        # closes it is already live.
+        mine, _ = split_working_orders(
+            [self.trade("SPY", "Submitted", filled=40.0)], self.allocation)
+        assert len(mine) == 1
+
+    def test_a_non_stock_order_on_an_allocation_symbol_is_flagged(self):
+        mine, _ = split_working_orders(
+            [self.trade("SPY", sec_type="OPT")], self.allocation)
+        assert len(mine) == 1
+
+    def test_both_groups_are_separated_in_one_pass(self):
+        trades = [self.trade("SPY"), self.trade("PLTR"), self.trade("AGG"),
+                  self.trade("VOO", "Filled")]
+        mine, others = split_working_orders(trades, self.allocation)
+        assert sorted(t.contract.symbol for t in mine) == ["AGG", "SPY"]
+        assert [t.contract.symbol for t in others] == ["PLTR"]
+
+    def test_the_description_names_what_has_to_be_acted_on(self):
+        line = describe_trades([self.trade("SPY", action="SELL", quantity=130,
+                                           filled=30.0)])
+        for part in ("SPY", "STK", "SELL", "130", "Submitted", "30"):
+            assert part in line, part
+
+    def test_the_description_survives_a_status_without_a_filled_count(self):
+        status = FakeOrderStatus("PreSubmitted")
+        trade = FakeTrade(FakeContract("SPY"), FakeOrder(1, "MKT"), status)
+        assert "SPY" in describe_trades([trade])
+
+
+class TestTradingHours:
+    """A market order sent outside the session is parked until the next open.
+
+    Nothing in the runner waits that long, so it reads the order as unfilled,
+    skips every buy by the rule that holds them back until the sells are
+    done, and the book sits half rebalanced for a week. IBKR is asked rather
+    than the clock, because holidays and early closes are not on the clock.
+    """
+
+    FRIDAY = "20260911:0930-20260911:1600;20260914:0930-20260914:1600"
+
+    def at(self, hour, minute=0, day=11):
+        return datetime(2026, 9, day, hour, minute, tzinfo=EASTERN)
+
+    def test_the_middle_of_the_session_is_open(self):
+        assert market_is_open(self.FRIDAY, "US/Eastern", self.at(15, 30))
+
+    def test_fifteen_minutes_after_the_close_is_shut(self):
+        # The cron this replaced ran here, at 16:15.
+        assert market_is_open(self.FRIDAY, "US/Eastern", self.at(16, 15)) is False
+
+    def test_the_open_is_inclusive_and_the_close_is_not(self):
+        assert market_is_open(self.FRIDAY, "US/Eastern", self.at(9, 30))
+        assert market_is_open(self.FRIDAY, "US/Eastern", self.at(16, 0)) is False
+
+    def test_before_the_open_is_shut(self):
+        assert market_is_open(self.FRIDAY, "US/Eastern", self.at(8, 0)) is False
+
+    def test_a_holiday_is_shut_even_at_noon(self):
+        # This is what a clock-only check would get wrong.
+        spec = "20260911:CLOSED;20260914:0930-20260914:1600"
+        assert market_is_open(spec, "US/Eastern", self.at(12, 0)) is False
+
+    def test_an_early_close_is_respected(self):
+        spec = "20260911:0930-20260911:1300"
+        assert market_is_open(spec, "US/Eastern", self.at(14, 0)) is False
+        assert market_is_open(spec, "US/Eastern", self.at(12, 0))
+
+    def test_the_next_session_is_read_too(self):
+        assert market_is_open(self.FRIDAY, "US/Eastern", self.at(10, 0, day=14))
+
+    def test_an_empty_string_is_unknown_rather_than_shut(self):
+        # Unknown must not block a rebalance; the caller prints and proceeds.
+        assert market_is_open("", "US/Eastern", self.at(15, 30)) is None
+
+    def test_an_unparseable_string_is_unknown(self):
+        assert market_is_open("nonsense", "US/Eastern", self.at(15, 30)) is None
+
+    def test_an_unknown_time_zone_falls_back_to_eastern(self):
+        assert market_is_open(self.FRIDAY, "Mars/Olympus", self.at(15, 30))
+
+    def test_every_window_is_parsed(self):
+        sessions = parse_sessions(self.FRIDAY, "US/Eastern")
+        assert len(sessions) == 2
+        assert sessions[0][0].hour == 9 and sessions[0][1].hour == 16
+
+    def test_closed_days_are_not_windows(self):
+        assert parse_sessions("20260911:CLOSED", "US/Eastern") == []
+
+
+class StepClock:
+    """A clock that moves one second every time it is read."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        value = self.now
+        self.now += 1.0
+        return value
+
+
+class TestCancelAndWait:
+    """Measured against the paper account on 2026-09-14.
+
+    Cancelling client id 62's order from client id 41 came back as
+    "Error 10147, reqId 5: OrderId 5 that needs to be cancelled is not found."
+    two milliseconds after the request, and the run then sat out the whole
+    sixty second --fill-timeout because ib_insync files an incoming error
+    under this connection's own client id (ib_insync/wrapper.py:1096) and so
+    never wrote that answer onto the order, which stayed at PendingCancel.
+    """
+
+    ALLOCATION = {"SPY": 1.0}
+    REFUSAL = (5, 10147, "OrderId 5 that needs to be cancelled is not found.")
+
+    def working_trade(self, order_id=5, statuses=None):
+        status = (FakeOrderStatus("Submitted") if statuses is None
+                  else SequencedOrderStatus(statuses))
+        return FakeTrade(FakeContract("SPY"), FakeOrder(order_id, "LMT"),
+                         status)
+
+    def test_the_measured_refusal_code_is_recognised(self):
+        assert 10147 in CANCEL_REFUSED_CODES
+
+    def test_a_refusal_ends_the_wait_without_sleeping(self):
+        ib = FakeIB()
+        ib.error_on_cancel = self.REFUSAL
+        trade = self.working_trade()
+        stuck, refusals = cancel_and_wait(ib, [trade], self.ALLOCATION, 60.0,
+                                          clock=StepClock())
+        assert len(stuck) == 1
+        assert ib.slept == 0.0
+
+    def test_the_refusal_carries_the_brokers_own_words(self):
+        ib = FakeIB()
+        ib.error_on_cancel = self.REFUSAL
+        _, refusals = cancel_and_wait(ib, [self.working_trade()],
+                                      self.ALLOCATION, 60.0, clock=StepClock())
+        assert len(refusals) == 1
+        assert "10147" in refusals[0]
+        assert "not found" in refusals[0]
+
+    def test_without_a_refusal_the_wait_runs(self):
+        ib = FakeIB()
+        trade = self.working_trade()
+        stuck, refusals = cancel_and_wait(ib, [trade], self.ALLOCATION, 60.0,
+                                          clock=StepClock())
+        assert len(stuck) == 1
+        assert refusals == []
+        assert ib.slept > 0.0
+
+    def test_an_order_that_goes_away_returns_nothing_stuck(self):
+        ib = FakeIB()
+        trade = self.working_trade(statuses=["Submitted", "Cancelled"])
+        stuck, refusals = cancel_and_wait(ib, [trade], self.ALLOCATION, 60.0,
+                                          clock=StepClock())
+        assert stuck == []
+        assert refusals == []
+
+    def test_an_unrelated_error_code_does_not_end_the_wait(self):
+        ib = FakeIB()
+        # 10349 is the order-preset notice seen on the same account; it says
+        # nothing about whether the cancel will be honoured.
+        ib.error_on_cancel = (5, 10349, "Order TIF was set to DAY.")
+        stuck, refusals = cancel_and_wait(ib, [self.working_trade()],
+                                          self.ALLOCATION, 60.0,
+                                          clock=StepClock())
+        assert refusals == []
+        assert ib.slept > 0.0
+
+    def test_a_refusal_for_another_order_is_ignored(self):
+        ib = FakeIB()
+        ib.error_on_cancel = (99, 10147, "OrderId 99 ... is not found.")
+        stuck, refusals = cancel_and_wait(ib, [self.working_trade(5)],
+                                          self.ALLOCATION, 60.0,
+                                          clock=StepClock())
+        assert refusals == []
+        assert ib.slept > 0.0
+
+    def test_every_order_given_is_cancelled(self):
+        ib = FakeIB()
+        trades = [self.working_trade(5), self.working_trade(6)]
+        cancel_and_wait(ib, trades, self.ALLOCATION, 60.0, clock=StepClock())
+        assert sorted(o.orderId for o in ib.cancelled) == [5, 6]
+
+    def test_the_error_handler_is_removed_afterwards(self):
+        ib = FakeIB()
+        ib.error_on_cancel = self.REFUSAL
+        cancel_and_wait(ib, [self.working_trade()], self.ALLOCATION, 60.0,
+                        clock=StepClock())
+        assert ib.errorEvent.handlers == []
+
+    def test_the_error_handler_is_removed_when_cancelling_raises(self):
+        ib = FakeIB()
+        ib.cancel_should_raise = True
+        with pytest.raises(RuntimeError):
+            cancel_and_wait(ib, [self.working_trade()], self.ALLOCATION, 60.0,
+                            clock=StepClock())
+        assert ib.errorEvent.handlers == []

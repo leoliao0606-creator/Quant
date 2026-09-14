@@ -43,7 +43,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from ibkr_ml.cache import load_cached_frame
+from ibkr_ml.cache import load_cached_frame, require_adjusted
 from ibkr_ml.features import to_eastern_naive
 
 warnings.filterwarnings("ignore")
@@ -221,6 +221,11 @@ def main() -> None:
     parser.add_argument("--draws", type=int, default=200)
     parser.add_argument("--seed", type=int, default=20260911)
     args = parser.parse_args()
+
+    # Only the default changed when this was last touched, so naming the
+    # unadjusted directory on the command line still ran - which is the
+    # mistake that reversed this script's own conclusion once.
+    require_adjusted(args.cache_dir, "跨资产趋势回测")
 
     symbols = [s for group in ASSET_CLASSES.values() for s in group]
     closes = load_prices(symbols, args.cache_dir, args.duration, args.start,

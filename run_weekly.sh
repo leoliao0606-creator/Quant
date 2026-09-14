@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Weekly run of the allocation runner, after Friday's close.
+# Weekly run of the allocation runner, late in Friday's session.
 #
 # Weekly, not monthly. Over 2006-2026 checking the volatility scaling every
 # week scores Sharpe 0.72 and checking it monthly scores 0.62, against 0.63
@@ -13,11 +13,18 @@
 # ignoring them would build a book on margin; the runner refuses to start
 # unless this number is stated. Raise it only after those are cleared.
 #
+# Inside the session, not after it. The orders are market orders, and a market
+# order sent after the close is not executed - it is parked until the next
+# open. The runner refuses to send buys until the sells are done, so an
+# after-close run would leave the book half rebalanced for a week. 15:30 gives
+# thirty minutes of trading to fill in, and the runner checks with IBKR that
+# the market is actually open before it sends anything.
+#
 # To install:
 #   (crontab -l 2>/dev/null; \
-#    echo '15 16 * * 5 /home/cliao/Projects/Quant/run_weekly.sh') | crontab -
-# The machine's clock is on America/New_York, so 16:15 is fifteen minutes
-# after the close all year, daylight saving included.
+#    echo '30 15 * * 5 /home/cliao/Projects/Quant/run_weekly.sh') | crontab -
+# The machine's clock is on America/New_York, so 15:30 is half an hour before
+# the close all year, daylight saving included.
 set -u
 cd /home/cliao/Projects/Quant || exit 1
 

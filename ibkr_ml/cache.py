@@ -46,6 +46,45 @@ def _paths(cache_dir: Path, key: str) -> tuple[Path, Path]:
     return cache_dir / f"{key}.csv", cache_dir / f"{key}.json"
 
 
+# Nothing inside a cached CSV says whether dividends are in the prices, so the
+# answer lives in one marker file per directory, written by fetch_assets.py.
+WHAT_TO_SHOW_MARKER = ".what_to_show"
+
+
+def cache_kind(cache_dir) -> str:
+    """Which `--what-to-show` the directory was fetched with, "" if unmarked."""
+    path = Path(cache_dir) / WHAT_TO_SHOW_MARKER
+    return path.read_text(encoding="utf-8").strip() if path.exists() else ""
+
+
+def require_adjusted(cache_dir, purpose: str = "") -> None:
+    """Refuse to read a cache that silently left dividends out.
+
+    Bars fetched as TRADES carry no distributions, which costs AGG about 2.8
+    points a year and GLD nothing at all, so it does not move a result evenly
+    - it tilts every comparison towards whatever pays least. That reversed a
+    cross-asset conclusion in this project once already, so it stops the run
+    rather than warning.
+
+    This lives here, next to the reading, because a copy in one script is a
+    check the other scripts do not have: trend_multi_asset.py changed its
+    default to the adjusted directory and kept no check at all, so naming the
+    unadjusted one on the command line still ran.
+    """
+    kind = cache_kind(cache_dir)
+    if kind == "ADJUSTED_LAST":
+        return
+    detail = (f"标记文件写着 {kind!r}" if kind
+              else f"缓存里没有 {WHAT_TO_SHOW_MARKER} 标记文件，无法确认怎么取的")
+    tail = f"（{purpose}）" if purpose else ""
+    raise SystemExit(
+        f"{cache_dir} 不是分红调整过的数据{tail}：{detail}。\n"
+        f"未复权的成交价不含分红，AGG 会少约 2.8 个百分点/年，GLD 一分不少，"
+        f"所以它不是把结果整体拉低，而是系统性偏袒不分红的资产。\n"
+        f"用 --cache-dir data_cache_adj，或先跑 "
+        f"fetch_assets.py --what-to-show ADJUSTED_LAST 重新下载。")
+
+
 def load_cached_frame(cache_dir, symbol: str, duration: str, bar_size: str, use_rth: bool):
     """Return the cached frame and its metadata, or (None, None) when absent."""
     pd = _load_pandas()

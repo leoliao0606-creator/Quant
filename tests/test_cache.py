@@ -15,10 +15,13 @@ import pandas as pd
 import pytest
 
 from ibkr_ml.cache import (
+    WHAT_TO_SHOW_MARKER,
     cache_age_days,
     cache_key,
+    cache_kind,
     fetch_frames,
     load_cached_frame,
+    require_adjusted,
     save_cached_frame,
 )
 
@@ -265,3 +268,47 @@ class TestConnectivityBlips:
             ],
         )
         assert error.is_retryable is False
+
+
+class TestWhatToShowMarker:
+    """A cache of traded prices has no dividends in it.
+
+    Reading one by mistake reversed a cross-asset conclusion in this project
+    once: AGG loses about 2.8 points a year without its distributions and GLD
+    loses nothing, so the error does not shift results evenly, it favours
+    whatever pays least. The check therefore stops the run.
+    """
+
+    def mark(self, tmp_path, kind):
+        (tmp_path / WHAT_TO_SHOW_MARKER).write_text(kind + "\n")
+        return tmp_path
+
+    def test_the_kind_is_read_back_without_the_newline(self, tmp_path):
+        self.mark(tmp_path, "ADJUSTED_LAST")
+        assert cache_kind(tmp_path) == "ADJUSTED_LAST"
+
+    def test_an_unmarked_directory_reads_as_empty(self, tmp_path):
+        assert cache_kind(tmp_path) == ""
+
+    def test_an_adjusted_directory_passes(self, tmp_path):
+        require_adjusted(self.mark(tmp_path, "ADJUSTED_LAST"))
+
+    def test_a_traded_price_directory_is_refused(self, tmp_path):
+        with pytest.raises(SystemExit) as caught:
+            require_adjusted(self.mark(tmp_path, "TRADES"))
+        assert "TRADES" in str(caught.value)
+
+    def test_an_unmarked_directory_is_refused(self, tmp_path):
+        # An old cache predates the marker, and its kind cannot be recovered
+        # from the bars, so "unknown" has to fail rather than be assumed good.
+        with pytest.raises(SystemExit) as caught:
+            require_adjusted(tmp_path)
+        assert WHAT_TO_SHOW_MARKER in str(caught.value)
+
+    def test_the_purpose_is_named_in_the_message(self, tmp_path):
+        with pytest.raises(SystemExit) as caught:
+            require_adjusted(self.mark(tmp_path, "TRADES"), "跨资产趋势回测")
+        assert "跨资产趋势回测" in str(caught.value)
+
+    def test_a_string_path_works_as_well_as_a_path_object(self, tmp_path):
+        require_adjusted(str(self.mark(tmp_path, "ADJUSTED_LAST")))

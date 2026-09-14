@@ -43,12 +43,11 @@ from __future__ import annotations
 
 import argparse
 import warnings
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from ibkr_ml.cache import load_cached_frame
+from ibkr_ml.cache import load_cached_frame, require_adjusted
 from ibkr_ml.features import to_eastern_naive
 
 warnings.filterwarnings("ignore")
@@ -74,31 +73,6 @@ ALLOCATIONS = {
 # flat in nominal terms from 1980 to 2000 - and any allocation leaning on it
 # has to be reported against the possibility that it does not repeat.
 GOLD_SCENARIOS = (None, 0.05, 0.025, 0.0)
-
-
-MARKER = ".what_to_show"
-
-
-def check_adjusted(cache_dir):
-    """Refuse to quote a number that silently left dividends out.
-
-    Bars fetched as TRADES carry no distributions, which costs AGG about
-    2.8 points a year and GLD nothing at all, so it does not shift a result
-    evenly - it tilts every comparison towards whatever pays least. The
-    cache records what it was fetched with in a marker file.
-    """
-    path = Path(cache_dir) / MARKER
-    kind = path.read_text().strip() if path.exists() else ""
-    if kind == "ADJUSTED_LAST":
-        return
-    detail = (f"标记文件写着 {kind!r}" if kind
-              else f"缓存里没有 {MARKER} 标记文件，无法确认怎么取的")
-    raise SystemExit(
-        f"{cache_dir} 不是分红调整过的数据：{detail}。\n"
-        f"未复权的成交价不含分红，AGG 会少约 2.8 个百分点/年，GLD 一分不少，"
-        f"所以它不是把结果整体拉低，而是系统性偏袒不分红的资产。\n"
-        f"用 --cache-dir data_cache_adj，或先跑 "
-        f"fetch_assets.py --what-to-show ADJUSTED_LAST 重新下载。")
 
 
 def load_prices(symbols, cache_dir, duration, start, end):
@@ -259,7 +233,7 @@ def main() -> None:
                              "volatility and its correlations intact.")
     args = parser.parse_args()
 
-    check_adjusted(args.cache_dir)
+    require_adjusted(args.cache_dir, "配置回测")
     symbols = [s for weights in ALLOCATIONS.values() for s in weights]
     closes = load_prices(symbols, args.cache_dir, args.duration, args.start, args.end)
     returns = closes.pct_change(fill_method=None)

@@ -76,6 +76,31 @@ class FakeTrade:
     orderStatus: object = field(default_factory=FakeOrderStatus)
 
 
+class FakeEvent:
+    """Enough of eventkit's Event to connect, disconnect and fire by hand.
+
+    ib_insync delivers a refused cancel as an error on this stream rather than
+    as a status change on the order, so a fake that cannot fire one cannot
+    reproduce the case that matters.
+    """
+
+    def __init__(self) -> None:
+        self.handlers: list = []
+
+    def __iadd__(self, handler):
+        self.handlers.append(handler)
+        return self
+
+    def __isub__(self, handler):
+        if handler in self.handlers:
+            self.handlers.remove(handler)
+        return self
+
+    def emit(self, *args):
+        for handler in list(self.handlers):
+            handler(*args)
+
+
 class FakeClient:
     def __init__(self) -> None:
         self.next_id = 1000
@@ -108,6 +133,10 @@ class FakeIB:
         self.qualified: list[FakeContract] = []
         self.slept = 0.0
         self.cancel_should_raise = False
+        self.errorEvent = FakeEvent()
+        # (reqId, errorCode, errorString) fired the instant a cancel is sent,
+        # the way IBKR answers a cancel it will not route.
+        self.error_on_cancel = None
 
     def accountSummary(self):
         return [FakeAccountValue("NetLiquidation", str(self.net_liquidation))]
@@ -138,6 +167,8 @@ class FakeIB:
         if self.cancel_should_raise:
             raise RuntimeError("cancel rejected by TWS")
         self.cancelled.append(order)
+        if self.error_on_cancel is not None:
+            self.errorEvent.emit(*self.error_on_cancel)
 
     def sleep(self, seconds):
         self.slept += seconds
