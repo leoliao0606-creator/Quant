@@ -1559,3 +1559,115 @@ check, and says loudly which symbols came from where.
 
 From here the only new evidence is forward: every historical window in
 this project has been used, except 2020-2022 daily.
+
+## Three more from the same review, measured live (2026-09-15)
+
+The six above were fixed on 2026-09-11. Three of those fixes turned out to
+be incomplete, and the incompleteness only showed up when the runner was
+put next to the backtest line by line. All three were confirmed by
+measurement, not by reading.
+
+### 7. The runner ran one clock where the backtest runs two
+
+Fix 1 above gave `portfolio_build.py` an `--overlay-every` and an
+`--overlay-band` so the backtest would measure what the runner does. It
+did not check the other direction. The backtest runs two independent
+rules:
+
+| | what it does | default |
+|---|---|---|
+| `static_weights` (line 118) | restore the allocation to target weights, no band anywhere | every 21 sessions |
+| `step_overlay` (line 162) | adopt a new **book scale**, only if it moved more than the band | every 5 sessions, 3% |
+
+The measured weights are the first multiplied by the second (line 250).
+The runner ran neither. It compared one band against a single symbol's
+target weight and called that the whole decision.
+
+Two consequences, both arithmetic. A book going from 100% to 95% moves
+each third-weight from 33.3% to 31.7%, a gap of 1.7%; the old rule asked
+whether that cleared 3% and held. The scale itself moved 5%, which is past
+the band that was measured, so in `thirds` the runner needed a **9% move
+where the backtest needed 3%** - three times slower, and slower is the
+direction that turns the weekly overlay back into the monthly one, the
+0.10 of Sharpe from fix 1. Separately, with no rebalance clock at all,
+every weekly run corrected price drift the backtest leaves alone for a
+month, paying commission the backtest never charges.
+
+The runner now keeps both clocks and remembers them across runs in
+`logs/overlay_state.json`. Measured against DUP430517 on 2026-09-15, all
+three paths, share counts checked by hand:
+
+| state | what it did |
+|---|---|
+| no state file | rebalanced: SPY 130 → 132 |
+| rebalanced yesterday | held everything; the old code would have sent that same 2-share SPY order for drift |
+| scale 0.80 → 1.00 | SPY 130 → 162, AGG 1040 → 1300, TIP 942 → 1177, all exactly 1/0.8 |
+
+The state file is written only after a run that reached the market and
+filled completely, so a dry run or a partial fill cannot claim a rebalance
+that did not happen.
+
+### 8. Every symbol's last bar was half a session
+
+IBKR hands back a bar for the session in progress, and once it is cached
+nothing distinguishes it from a finished day. `data_cache_adj` was fetched
+at 12:49 Eastern on 2026-09-11, so all 289 symbols carried a half day as
+their last row. Re-downloading SPY after the close gives the same bar
+twice:
+
+| | open | high | low | close | volume |
+|---|---|---|---|---|---|
+| cached (partial) | 764.69 | 766.38 | 763.60 | **765.71** | **12,365,241** |
+| fresh (complete) | 764.69 | 766.38 | 763.60 | **764.29** | **24,660,437** |
+
+Open, high and low are identical - the afternoon broke neither extreme -
+so the only marks of a half day are the close and the volume. The volume
+ratio is 50.1% against 12:49 being 51% of a 6.5 hour session. The
+same-day return reads +1.040% where it was +0.852%, off by 0.187 points,
+and volatility read off a half session looks calmer than the market is,
+which is the direction that sizes a book too large.
+
+**What was actually affected, and what was not.** `portfolio_build.py`,
+`trend_multi_asset.py` and `cross_section_audit.py` were never affected:
+their `--end` defaults are the hardcoded `2026-09-11` and `load_prices`
+filters on `stamps < end`, so that bar was already outside every window.
+Confirmed by running `portfolio_build.py` with and without
+`--end 2026-09-11`: zero lines of difference, so every number in this file
+stands. The exposed scripts are `volatility_target.py` (`--end` defaults
+to `None`), `benchmark_buy_and_hold.py`, `permutation_test.py` and
+`holdout_validation.py`, which have no `--end` at all. Those three
+hardcoded dates are a fragile guard: they hold only until the data is
+re-downloaded and the dates are not moved with it.
+
+The drop now happens inside `save_cached_frame`, so every reader is
+covered rather than each one remembering. Daily bars only; no backtest
+here reads an intraday size.
+
+### 9. The dividend marker guarded one write path out of two
+
+Fix 6 above moved `require_adjusted` next to the reading so every script
+would check. Reading was never the hole. `fetch_assets.py` wrote
+`.what_to_show` and refused to mix two kinds in one directory, but only
+for downloads that went through `fetch_assets.py`. `train_model.py` does
+not: it calls `fetch_frames`, which calls `save_cached_frame` directly,
+and it passed no `what_to_show` at all (`train_model.py:256`), taking
+`fetch_historical_frame`'s `TRADES` default (`ibkr_ml/data.py:584`) into
+whatever `--cache-dir` named. So `train_model.py --cache-dir
+data_cache_adj` wrote unadjusted bars into the adjusted directory, left
+the marker saying `ADJUSTED_LAST`, and every later `require_adjusted`
+passed - the exact error that reversed a cross-asset conclusion here once.
+
+`claim_cache_kind` now makes the claim at the one place bars reach the
+disk, and `what_to_show` is keyword-only with no default on
+`save_cached_frame` and `fetch_frames`: a default there would be the
+silent `TRADES` that caused this. `fetch_assets.py` calls the same
+function before downloading, so a mismatch still stops before a TWS
+session is held rather than after.
+
+### One operational thing that was never true
+
+`run_weekly.sh` had never been installed. `crontab -l` returned "no
+crontab for cliao", so the weekly overlay - the whole 0.10 of Sharpe from
+fix 1 - was worth nothing, because nothing ran it weekly. Installed as
+`30 15 * * 5`, verified first by running the script under `env -i`, which
+is the environment cron actually gives it.

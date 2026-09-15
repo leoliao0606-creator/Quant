@@ -560,9 +560,28 @@ def main() -> None:
 
         prices = pd.DataFrame(closes).dropna()
         now = datetime.now(EASTERN)
-        # The price used to size an order should be the one trading now; the
-        # volatility estimate must not see a session that is still running.
+        # The same frame does two jobs. Sizing an order wants the price that
+        # is trading now, so it takes the last bar even when that bar belongs
+        # to a session still running: a partial daily bar's close is the
+        # latest trade, which is exactly what is wanted here. The volatility
+        # estimate must not see that bar at all, so it is dropped below.
+        #
+        # That only holds when the bars came from IBKR moments ago. On the
+        # cache fallback the last bar is some previous session's close, up to
+        # --max-stale-days old, and sizing off it misses every move since -
+        # a symbol up 5% since that close gets bought 5% short of its target.
+        # dropna() also aligns the symbols, so one lagging cached symbol pulls
+        # every price back to its own last session. An earlier version of this
+        # comment called the price "the one trading now" with no qualifier,
+        # which was only ever true on the live path.
+        price_day = prices.index[-1]
+        price_age = (now.date() - price_day.date()).days
         live_price = {s: float(prices[s].iloc[-1]) for s in allocation}
+        if price_age > 0:
+            origin = "，".join(f"{k} {v}" for k, v in sources.items())
+            print(f"  注意：下单价用的是 {price_day.date()} 的收盘价，"
+                  f"距今 {price_age} 天，不是现价。这之后的涨跌不会反映在"
+                  f"股数里。价格来源：{origin}")
         prices, dropped = drop_incomplete_bar(prices, now)
         if dropped:
             print(f"  {now:%Y-%m-%d %H:%M} 美东，当日尚未收盘，"
@@ -748,6 +767,8 @@ def main() -> None:
 
         payload = {"allocation": allocation, "bar_date": str(last_day.date()),
                    "equity": equity, "capital": capital, "scale": scale,
+                   "price_day": str(price_day.date()), "price_age": price_age,
+                   "price_sources": dict(sources),
                    "raw_scale": raw_scale, "previous_scale": previous_scale,
                    "scale_moved": scale_moved, "rebalancing": rebalancing,
                    "sessions_since_rebalance": elapsed,
