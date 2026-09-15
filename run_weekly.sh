@@ -20,6 +20,15 @@
 # thirty minutes of trading to fill in, and the runner checks with IBKR that
 # the market is actually open before it sends anything.
 #
+# State lives in logs/overlay_state.json, which records the book scale this
+# run adopted and the date the weights were last restored. The runner needs
+# both to reproduce what was measured: the allocation is restored monthly
+# (21 sessions) and the scale only moves when it has shifted more than 3%,
+# so a run with no memory of the previous one would rebalance every week
+# instead. logs/ is gitignored, so the file does not travel with the repo -
+# deleting it, or running this on a fresh clone, makes the next run rebalance
+# immediately. That is safe, it just pays one extra round of commission.
+#
 # To install:
 #   (crontab -l 2>/dev/null; \
 #    echo '30 15 * * 5 /home/cliao/Projects/Quant/run_weekly.sh') | crontab -

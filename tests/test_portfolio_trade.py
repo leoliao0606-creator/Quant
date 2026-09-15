@@ -9,8 +9,9 @@ rule is a session staler than the backtest, worth 0.10 of Sharpe), and a
 session still trading must not be visible at all.
 """
 
+import json
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -25,9 +26,10 @@ from conftest import (FakeContract, FakeIB, FakeOrder, FakeOrderStatus,
 from portfolio_trade import (CANCEL_REFUSED_CODES, MIN_HISTORY,
                              SESSION_CLOSE_HOUR, VOL_WINDOW, book_scale,
                              cancel_and_wait, describe_trades,
-                             drop_incomplete_bar, market_is_open,
-                             parse_allocation, parse_sessions,
-                             split_working_orders)
+                             drop_incomplete_bar, load_overlay_state,
+                             market_is_open, parse_allocation, parse_sessions,
+                             plan_targets, save_overlay_state, sessions_since,
+                             split_working_orders, step_scale)
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -430,3 +432,187 @@ class TestCancelAndWait:
             cancel_and_wait(ib, [self.working_trade()], self.ALLOCATION, 60.0,
                             clock=StepClock())
         assert ib.errorEvent.handlers == []
+
+
+THIRDS = {"SPY": 1 / 3, "AGG": 1 / 3, "TIP": 1 / 3}
+PRICES = {"SPY": 750.0, "AGG": 100.0, "TIP": 100.0}
+
+
+class TestStepScale:
+    """The band is measured against the book scale, not a symbol's weight.
+
+    portfolio_build.step_overlay compares `abs(value - current) > band` where
+    value is the whole book's scale. The runner compared its band against one
+    symbol's target weight instead, which in `thirds` is a third of the same
+    number - a 3% band on a weight needing a 9% move in the scale to fire.
+    """
+
+    def test_the_first_run_adopts_whatever_it_computed(self):
+        scale, moved = step_scale(0.82, None, 0.03)
+        assert (scale, moved) == (0.82, True)
+
+    def test_a_move_inside_the_band_keeps_the_old_scale(self):
+        scale, moved = step_scale(0.82, 0.80, 0.03)
+        assert (scale, moved) == (0.80, False)
+
+    def test_a_move_past_the_band_adopts_the_new_scale(self):
+        scale, moved = step_scale(0.86, 0.80, 0.03)
+        assert (scale, moved) == (0.86, True)
+
+    def test_the_boundary_is_strictly_greater_like_the_backtest(self):
+        # portfolio_build.step_overlay line 175 uses > and not >=.
+        scale, moved = step_scale(0.83, 0.80, 0.03)
+        assert (scale, moved) == (0.80, False)
+
+    def test_the_band_is_symmetric(self):
+        assert step_scale(0.74, 0.80, 0.03) == (0.74, True)
+
+    def test_a_third_of_a_move_would_not_have_fired_on_a_weight(self):
+        """The bug this replaces, stated as arithmetic.
+
+        A book going from 100% to 95% moves each third-weight from 33.3% to
+        31.7%, a gap of 1.7%. The old test was `1.7% <= 3%`, so it held. The
+        scale itself moved 5%, which is past the band that was measured.
+        """
+        weight_gap = abs(1 / 3 * 0.95 - 1 / 3 * 1.00)
+        assert weight_gap < 0.03          # the old rule would not have traded
+        assert step_scale(0.95, 1.00, 0.03) == (0.95, True)
+
+
+class TestSessionsSince:
+    def test_no_previous_date_reads_as_unknown(self):
+        index = pd.bdate_range("2026-01-01", periods=10)
+        assert sessions_since(index, None) is None
+
+    def test_it_counts_bars_and_not_calendar_days(self):
+        """21 has to mean a month of trading, which is what the backtest
+        means: static_weights slices closes.index, so weekends and holidays
+        are simply absent rather than counted."""
+        index = pd.bdate_range("2026-01-01", periods=30)
+        elapsed = sessions_since(index, date(2026, 1, 1))
+        assert elapsed == 29
+        assert (index[-1].date() - date(2026, 1, 1)).days > elapsed
+
+    def test_the_day_itself_is_not_counted(self):
+        index = pd.bdate_range("2026-01-01", periods=5)
+        assert sessions_since(index, index[-1].date()) == 0
+
+    def test_a_date_after_the_last_bar_counts_nothing(self):
+        index = pd.bdate_range("2026-01-01", periods=5)
+        assert sessions_since(index, date(2030, 1, 1)) == 0
+
+
+class TestPlanTargets:
+    def test_a_rebalance_restores_the_target_weights(self):
+        plans = plan_targets(THIRDS, {"SPY": 0, "AGG": 0, "TIP": 0}, PRICES,
+                             300000.0, 1.0, None, True, 0.0)
+        wanted = {p["symbol"]: p["wanted"] for p in plans}
+        assert wanted == {"SPY": 133, "AGG": 1000, "TIP": 1000}
+
+    def test_a_rebalance_multiplies_the_target_by_the_scale(self):
+        plans = plan_targets(THIRDS, {"SPY": 0, "AGG": 0, "TIP": 0}, PRICES,
+                             300000.0, 0.5, None, True, 0.0)
+        wanted = {p["symbol"]: p["wanted"] for p in plans}
+        assert wanted == {"SPY": 66, "AGG": 500, "TIP": 500}
+
+    def test_between_rebalances_price_drift_is_left_alone(self):
+        """This is the half the runner did not have.
+
+        The backtest lets the weights drift between rebalance dates and
+        trades only on them (static_weights, line 136). A held book that has
+        drifted is therefore correct, not something to correct.
+        """
+        held = {"SPY": 200, "AGG": 500, "TIP": 900}   # badly off target
+        plans = plan_targets(THIRDS, held, PRICES, 300000.0, 0.80, 0.80,
+                             False, 0.0)
+        assert all(p["delta"] == 0 for p in plans)
+
+    def test_between_rebalances_a_new_scale_moves_everything_in_proportion(self):
+        held = {"SPY": 100, "AGG": 1000, "TIP": 1000}
+        plans = plan_targets(THIRDS, held, PRICES, 300000.0, 0.50, 1.00,
+                             False, 0.0)
+        wanted = {p["symbol"]: p["wanted"] for p in plans}
+        assert wanted == {"SPY": 50, "AGG": 500, "TIP": 500}
+
+    def test_a_rising_scale_buys_between_rebalances(self):
+        held = {"SPY": 50, "AGG": 500, "TIP": 500}
+        plans = plan_targets(THIRDS, held, PRICES, 300000.0, 1.00, 0.50,
+                             False, 0.0)
+        assert {p["symbol"]: p["delta"] for p in plans} == {
+            "SPY": 50, "AGG": 500, "TIP": 500}
+
+    def test_without_a_previous_scale_nothing_moves_off_a_rebalance(self):
+        """A first run that is somehow not a rebalance has no ratio to apply,
+        and inventing one would resize the book off a number never adopted."""
+        held = {"SPY": 100, "AGG": 1000, "TIP": 1000}
+        plans = plan_targets(THIRDS, held, PRICES, 300000.0, 0.5, None,
+                             False, 0.0)
+        assert all(p["delta"] == 0 for p in plans)
+
+    def test_min_trade_drops_a_difference_too_small_to_be_worth_a_commission(self):
+        # One share of a 750 dollar stock against 300,000 is 0.25%.
+        held = {"SPY": 132, "AGG": 1000, "TIP": 1000}
+        plans = plan_targets(THIRDS, held, PRICES, 300000.0, 1.0, None,
+                             True, 0.005)
+        spy = next(p for p in plans if p["symbol"] == "SPY")
+        assert spy["wanted"] == 133 and spy["skipped"] is True
+        assert spy["delta"] == 0
+
+    def test_min_trade_zero_follows_the_backtest_exactly(self):
+        held = {"SPY": 132, "AGG": 1000, "TIP": 1000}
+        plans = plan_targets(THIRDS, held, PRICES, 300000.0, 1.0, None,
+                             True, 0.0)
+        spy = next(p for p in plans if p["symbol"] == "SPY")
+        assert spy["delta"] == 1 and spy["skipped"] is False
+
+    def test_a_difference_above_min_trade_survives(self):
+        held = {"SPY": 100, "AGG": 1000, "TIP": 1000}
+        plans = plan_targets(THIRDS, held, PRICES, 300000.0, 1.0, None,
+                             True, 0.005)
+        spy = next(p for p in plans if p["symbol"] == "SPY")
+        assert spy["delta"] == 33 and spy["skipped"] is False
+
+    def test_the_reported_target_weight_is_what_is_actually_wanted(self):
+        """Between rebalances the target is not share * scale, so printing
+        that would describe a book the run is not building."""
+        held = {"SPY": 100, "AGG": 1000, "TIP": 1000}
+        plans = plan_targets(THIRDS, held, PRICES, 300000.0, 0.50, 1.00,
+                             False, 0.0)
+        spy = next(p for p in plans if p["symbol"] == "SPY")
+        assert spy["target_weight"] == pytest.approx(50 * 750.0 / 300000.0)
+        assert spy["target_weight"] != pytest.approx(1 / 3 * 0.50)
+
+
+class TestOverlayState:
+    def test_a_missing_file_is_a_fresh_start_not_an_error(self, tmp_path):
+        assert load_overlay_state(tmp_path / "nope.json", "thirds") is None
+
+    def test_a_corrupt_file_is_a_fresh_start_not_an_error(self, tmp_path):
+        path = tmp_path / "state.json"
+        path.write_text("{not json", encoding="utf-8")
+        assert load_overlay_state(path, "thirds") is None
+
+    def test_a_state_from_another_allocation_is_ignored(self, tmp_path):
+        """A scale measured on one allocation says nothing about another."""
+        path = tmp_path / "state.json"
+        save_overlay_state(path, "balanced", 0.8, "2026-09-14")
+        assert load_overlay_state(path, "thirds") is None
+        assert load_overlay_state(path, "balanced")["scale"] == 0.8
+
+    def test_what_is_saved_is_what_is_read_back(self, tmp_path):
+        path = tmp_path / "logs" / "state.json"
+        save_overlay_state(path, "thirds", 0.83, "2026-09-14")
+        state = load_overlay_state(path, "thirds")
+        assert state["scale"] == 0.83
+        assert state["last_rebalance"] == "2026-09-14"
+        assert date.fromisoformat(state["last_rebalance"]) == date(2026, 9, 14)
+
+    def test_saving_creates_the_directory(self, tmp_path):
+        path = tmp_path / "a" / "b" / "state.json"
+        save_overlay_state(path, "thirds", 1.0, None)
+        assert json.loads(path.read_text(encoding="utf-8"))["scale"] == 1.0
+
+    def test_a_json_file_that_is_not_an_object_is_a_fresh_start(self, tmp_path):
+        path = tmp_path / "state.json"
+        path.write_text("[1, 2, 3]", encoding="utf-8")
+        assert load_overlay_state(path, "thirds") is None

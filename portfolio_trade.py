@@ -26,6 +26,19 @@ and only the drawdown improves. The cliff sits between weekly and
 fortnightly; weekly costs 0.01 of Sharpe against every session, and the
 band matters hardly at all (3% and 10% are within 0.01 of each other).
 
+Two clocks, not one, because that is what was measured. The allocation is
+restored to its target weights every --rebalance sessions (21, a month) and
+is left to drift with price in between; the book scale is looked at on every
+run and only adopted when it has moved more than --band (3%). These are
+portfolio_build.py's --rebalance and --overlay-band, and the results above
+come from running both. An earlier version of this file ran neither: it
+compared --band against a single symbol's target weight, which in `thirds`
+is a third of the book, so the 3% band needed a 9% move in the scale before
+it fired - three times slower than the rule that scored 0.72 - and it
+restored the weights on every run rather than monthly. Remembering the last
+scale and the last rebalance date is what --state-file is for; deleting that
+file makes the next run a first run, which rebalances immediately.
+
 The gold allocation `balanced` returned +6.84% at Sharpe 0.77 on the daily
 convention; it has not been re-measured weekly, and its weights were
 chosen after reading a sensitivity table, so treat both numbers as soft.
@@ -69,7 +82,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -278,6 +291,115 @@ def describe_trades(trades):
         for t in trades)
 
 
+def step_scale(raw, previous, band):
+    """Adopt a new book scale only once it has moved more than `band`.
+
+    This is the runner's half of portfolio_build.step_overlay (line 162),
+    which is where the measured results come from. That function compares the
+    band against the *book scale*. The runner used to compare its band
+    against one symbol's weight instead, and in `thirds` a symbol carries a
+    third of the book, so a 3% band on a weight is a 9% band on the scale -
+    three times slower to react than anything that was measured. Slower is
+    the direction that turns the weekly overlay back into the monthly one,
+    which step_overlay's own docstring puts at 0.10 of Sharpe.
+
+    Returns the scale to use and whether it moved. `previous` is None on the
+    first run, when there is nothing to hold on to.
+    """
+    if previous is None:
+        return raw, True
+    if abs(raw - previous) > band:
+        return raw, True
+    return previous, False
+
+
+def sessions_since(index, day):
+    """Completed sessions in `index` after `day`, or None if `day` is None.
+
+    Counts bars rather than calendar days, the same way
+    portfolio_build.static_weights picks its rebalance dates off
+    closes.index (line 126). Holidays and weekends are therefore not
+    counted, which is what makes 21 mean a month of trading.
+    """
+    if day is None:
+        return None
+    return sum(1 for stamp in index if stamp.date() > day)
+
+
+def plan_targets(allocation, held, price, capital, scale, previous_scale,
+                 rebalancing, min_trade):
+    """Target share counts, following the backtest's two separate clocks.
+
+    portfolio_build.py runs two of them. static_weights (line 118) restores
+    the allocation to its target weights every --rebalance sessions and lets
+    it drift with price in between, with no band anywhere. step_overlay
+    (line 162) resizes the whole book, and only when the scale has moved more
+    than its band. The weights that were measured are the first multiplied by
+    the second (line 250).
+
+    So on a rebalance session the target is the allocation share times the
+    scale. In between, the drift is left alone - the account's own positions
+    are the drift - and only a change in the scale moves anything, applied to
+    every holding in proportion.
+
+    `min_trade` has no counterpart in the backtest. It drops a difference
+    worth less than that fraction of capital, because an order for one or two
+    shares pays a per-order cost that the backtest's flat 5 bps a side does
+    not model. Pass 0 to follow the backtest exactly.
+    """
+    plans = []
+    for symbol, share in allocation.items():
+        have = held[symbol]
+        if rebalancing:
+            wanted = int(capital * share * scale / price[symbol])
+        elif previous_scale and previous_scale > 0:
+            # Same proportion of whatever is held, which is what multiplying
+            # a drifted weight vector by a new scale comes out as.
+            wanted = int(have * scale / previous_scale)
+        else:
+            wanted = have
+        delta = wanted - have
+        gap = abs(delta) * price[symbol] / capital
+        skipped = bool(delta) and gap < min_trade
+        plans.append({"symbol": symbol, "price": price[symbol],
+                      "target_weight": wanted * price[symbol] / capital,
+                      "current_weight": have * price[symbol] / capital,
+                      "wanted": wanted, "held": have,
+                      "delta": 0 if skipped else delta,
+                      "gap": gap, "skipped": skipped})
+    return plans
+
+
+def load_overlay_state(path, allocation_name):
+    """The last adopted scale and rebalance date, or None on a fresh start.
+
+    A missing, unreadable or unparseable file is a fresh start rather than an
+    error: the run can always rebuild both from the account itself, and
+    refusing to trade because a bookkeeping file is corrupt would be worse
+    than rebalancing one session early.
+    """
+    try:
+        state = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(state, dict) or state.get("allocation") != allocation_name:
+        # A scale measured on one allocation says nothing about another, and
+        # a rebalance date belongs to the weights that were restored.
+        return None
+    return state
+
+
+def save_overlay_state(path, allocation_name, scale, last_rebalance):
+    """Record what this run actually adopted, for the next one to read."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(
+        {"allocation": allocation_name, "scale": scale,
+         "last_rebalance": last_rebalance,
+         "written": datetime.now(EASTERN).isoformat(timespec="seconds")},
+        indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
 def book_scale(portfolio_returns, mode, fixed_target):
     """How much of the allocation to hold, from the book's own volatility.
 
@@ -326,7 +448,21 @@ def main() -> None:
                         default="expanding")
     parser.add_argument("--fixed-target", type=float, default=0.16)
     parser.add_argument("--band", type=float, default=0.03,
-                        help="单个标的的仓位偏离超过这个比例才调整。")
+                        help="整体仓位偏离超过这个比例才调整。这是对整个组合"
+                             "的仓位倍数说的，不是对单个标的的权重说的，"
+                             "和回测 portfolio_build.py --overlay-band 同义。")
+    parser.add_argument("--rebalance", type=int, default=21,
+                        help="隔多少个交易日把配置恢复到目标权重一次。"
+                             "和回测 portfolio_build.py --rebalance 同义，"
+                             "21 是一个月。中间的价格漂移不管。")
+    parser.add_argument("--min-trade", type=float, default=0.005,
+                        help="差额折算成本金的比例小于这个值就不下单。"
+                             "回测里没有这一条，它挡掉的是一两股的零头单，"
+                             "这种单在实盘要付每笔固定费用，而回测只按 5bps "
+                             "比例算。填 0 就完全照回测来。")
+    parser.add_argument("--state-file", default="logs/overlay_state.json",
+                        help="记上次采用的整体仓位和上次再平衡日期。"
+                             "删掉它下次运行就当首次运行：立刻再平衡。")
     parser.add_argument("--max-stale-days", type=int, default=4,
                         help="最后一根K线超过这么多天就拒绝交易。")
     parser.add_argument("--duration", default="20 Y",
@@ -438,10 +574,28 @@ def main() -> None:
                              f"超过 {args.max_stale_days} 天上限，已中止")
 
         if args.overlay == "none":
-            scale, trailing, target = 1.0, float("nan"), float("nan")
+            raw_scale, trailing, target = 1.0, float("nan"), float("nan")
         else:
-            scale, trailing, target = book_scale(portfolio, args.overlay,
-                                                 args.fixed_target)
+            raw_scale, trailing, target = book_scale(portfolio, args.overlay,
+                                                     args.fixed_target)
+
+        # The backtest runs two clocks and the runner has to run both of them
+        # or it is measuring a different strategy: the scale only moves once
+        # it has moved more than the band (portfolio_build.step_overlay, line
+        # 162), and the weights are only restored every --rebalance sessions
+        # (portfolio_build.static_weights, line 118). Both have to remember
+        # the previous run, which is the whole reason the state file exists.
+        state = load_overlay_state(args.state_file, args.allocation)
+        previous_scale = (state or {}).get("scale")
+        last_rebalance = None
+        if state and state.get("last_rebalance"):
+            try:
+                last_rebalance = date.fromisoformat(state["last_rebalance"])
+            except (TypeError, ValueError):
+                last_rebalance = None
+        scale, scale_moved = step_scale(raw_scale, previous_scale, args.band)
+        elapsed = sessions_since(prices.index, last_rebalance)
+        rebalancing = elapsed is None or elapsed >= args.rebalance
 
         # ib_insync asks TWS for open orders once, as it connects
         # (ib_insync/ib.py:1762 calls reqOpenOrders), and that request returns
@@ -549,34 +703,49 @@ def main() -> None:
         if args.overlay != "none":
             print(f"  组合近 {VOL_WINDOW} 天年化波动 {trailing:.2%}   "
                   f"长期目标 {target:.2%}   整体仓位 {scale:.1%}")
+            if not scale_moved:
+                print(f"    本次算出 {raw_scale:.1%}，与上次采用的 "
+                      f"{previous_scale:.1%} 相差 "
+                      f"{abs(raw_scale - previous_scale):.1%} ≤ "
+                      f"{args.band:.0%}，沿用上次的")
+            elif previous_scale is not None:
+                print(f"    上次采用 {previous_scale:.1%}，相差 "
+                      f"{abs(raw_scale - previous_scale):.1%} > "
+                      f"{args.band:.0%}，改用本次算出的")
+        if rebalancing:
+            since = ("没有上次记录，按首次运行处理" if elapsed is None
+                     else f"距上次再平衡 {elapsed} 个交易日 ≥ {args.rebalance}")
+            print(f"  本次再平衡到目标权重（{since}）")
+        else:
+            print(f"  本次不再平衡（距上次再平衡 {elapsed} 个交易日 < "
+                  f"{args.rebalance}），价格漂移不管，只跟随整体仓位的变化")
         print(f"  {'标的':<6} {'价格':>9} {'目标权重':>9} {'当前权重':>9} "
               f"{'应持':>8} {'现持':>8} {'差':>8}  动作")
 
+        plans = plan_targets(allocation, held, live_price, capital, scale,
+                             previous_scale, rebalancing, args.min_trade)
         orders, decisions = [], []
-        for symbol, share in allocation.items():
-            price = live_price[symbol]
-            want_weight = share * scale
-            wanted = int(capital * want_weight / price)
-            have = held[symbol]
-            have_weight = have * price / capital
-            delta = wanted - have
-            gap = abs(want_weight - have_weight)
-            if gap <= args.band:
-                action = f"不动（差 {gap:.1%} ≤ {args.band:.0%}）"
-            elif delta == 0:
+        for plan in plans:
+            if plan["skipped"]:
+                action = (f"不动（差 {plan['gap']:.2%} < "
+                          f"{args.min_trade:.1%} 本金）")
+            elif plan["delta"] == 0:
                 action = "不动（股数差 0）"
             else:
-                action = f"{'买入' if delta > 0 else '卖出'} {abs(delta):,}"
-                orders.append((symbol, delta))
-            print(f"  {symbol:<6} {price:>9.2f} {want_weight:>9.1%} "
-                  f"{have_weight:>9.1%} {wanted:>8,} {have:>8,} {delta:>+8,}  {action}")
-            decisions.append({"symbol": symbol, "price": price,
-                              "target_weight": want_weight,
-                              "current_weight": have_weight, "wanted": wanted,
-                              "held": have, "delta": delta, "gap": gap})
+                action = (f"{'买入' if plan['delta'] > 0 else '卖出'} "
+                          f"{abs(plan['delta']):,}")
+                orders.append((plan["symbol"], plan["delta"]))
+            print(f"  {plan['symbol']:<6} {plan['price']:>9.2f} "
+                  f"{plan['target_weight']:>9.1%} {plan['current_weight']:>9.1%} "
+                  f"{plan['wanted']:>8,} {plan['held']:>8,} "
+                  f"{plan['wanted'] - plan['held']:>+8,}  {action}")
+            decisions.append(plan)
 
         payload = {"allocation": allocation, "bar_date": str(last_day.date()),
                    "equity": equity, "capital": capital, "scale": scale,
+                   "raw_scale": raw_scale, "previous_scale": previous_scale,
+                   "scale_moved": scale_moved, "rebalancing": rebalancing,
+                   "sessions_since_rebalance": elapsed,
                    "trailing_vol": trailing, "target_vol": target,
                    "foreign_positions": [{"symbol": s, "quantity": q,
                                           "market_value": v}
@@ -667,6 +836,20 @@ def main() -> None:
                             "executed": True, "orders": results})
             if any(not r["complete"] for r in results):
                 print("  有单未完全成交，下次运行前先确认账户状态")
+
+        # Only a run that actually reached the market may move these
+        # markers forward. A dry run must not, or the next real run would
+        # think a rebalance it never sent had already happened; and a partial
+        # fill must not either, because the positions are not where the
+        # markers would claim they are. Not writing is always safe: the next
+        # run rebalances one session early, which costs one round of
+        # commission and nothing else.
+        settled = all(row["complete"] for row in payload.get("orders", []))
+        if args.execute and payload["action"] in ("orders_sent", "hold") and settled:
+            save_overlay_state(
+                args.state_file, args.allocation, scale,
+                str(last_day.date()) if rebalancing
+                else (state or {}).get("last_rebalance"))
 
         log_event(Path(args.log_dir), payload)
     finally:
