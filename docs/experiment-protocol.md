@@ -1671,3 +1671,55 @@ crontab for cliao", so the weekly overlay - the whole 0.10 of Sharpe from
 fix 1 - was worth nothing, because nothing ran it weekly. Installed as
 `30 15 * * 5`, verified first by running the script under `env -i`, which
 is the environment cron actually gives it.
+
+### 10. The published Sharpe moves with where the data starts
+
+Re-downloading the cache to clear finding 8 changed every number in the
+全期 table, which was not expected: the partial bar sat outside every
+window. Diffing SPY's old and new CSV explains it. Of 5024 shared dates,
+**5023 closes are identical to the last cent** - the adjustment factors do
+not drift and the history is stable. What moved is the window:
+
+```
+old: 2006-09-18 → 2026-09-11  (5026 rows)
+new: 2006-09-20 → 2026-09-14  (5025 rows)
+```
+
+`--duration "20 Y"` is a window relative to now, so a re-download moves the
+first row. And `portfolio_build.py:126` picks rebalance dates as
+`closes.index[::21]` - counted from the first row, not from a calendar. Move
+the start by two sessions and all ~240 rebalance days of the next twenty
+years move with it. `step_overlay`'s `i % every == 0` counts from the same
+place, so the overlay's check days move too.
+
+Confirmed directly: same data, `--start 2006-09-20` against
+`--start 2006-09-22`, thirds + overlay goes from Sharpe 0.73 to 0.69, and
+all 30 lines of the 全期 table change.
+
+Sweeping the start across one full rebalance period (21 sessions, same
+data, same everything else) with `start_sensitivity.py`:
+
+| | Sharpe range | spread |
+|---|---|---|
+| thirds, no overlay | 0.628 – 0.639 | 0.011 |
+| thirds + overlay | 0.687 – **0.726** | 0.039 |
+| the overlay's gain | +0.052 – +0.093 | median **+0.080** |
+
+**The conclusion holds and the headline number was flattering.** The gain
+is positive at all 21 starts, with a worst case of +0.052, so the overlay
+is not an artefact of one lucky alignment. But 0.72 sits near the top of
+its range against a median of 0.717, and the honest way to state the result
+is the gain and its spread - "+0.08 of Sharpe, between +0.05 and +0.09" -
+rather than a single 0.72 that is reproducible only until the data is
+pulled again.
+
+Note which number is stable: without the overlay the spread is 0.011, so
+this is not noise in the price data. It is the overlay's own schedule
+being anchored to an arbitrary row.
+
+Not fixed here, because fixing it changes every published number and that
+should be a deliberate step: anchoring rebalance and overlay days to the
+calendar (month ends, say) instead of to `index[::n]` would make a result
+survive a re-download. Until then, a re-download is a silent re-roll of
+this dice, and `--start` does not pin it - the effective start is whatever
+the earliest row in the cache happens to be.
