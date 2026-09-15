@@ -3,8 +3,9 @@
   "duration": "20 Y",
   "bar_size": "1 day",
   "use_rth": true,
-  "fetched_at": "2026-09-11T17:03:32.589765+00:00",
-  "row_count": 3590,
+  "what_to_show": "ADJUSTED_LAST",
+  "fetched_at": "2026-09-15T17:50:09.581632+00:00",
+  "row_count": 3591,
   "first_timestamp": "2012-06-01 00:00:00",
-  "last_timestamp": "2026-09-11 00:00:00"
+  "last_timestamp": "2026-09-14 00:00:00"
 }
