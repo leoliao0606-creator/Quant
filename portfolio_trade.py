@@ -86,11 +86,16 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+# Neither of these pulls in pandas at import time, so --help still works
+# without it. SESSION_CLOSE_HOUR is shared rather than redefined: the cache
+# drops a partial session on the way in and this file drops one on the way
+# out, and two copies of "the close is 16:00" is one copy that can be missed.
+from ibkr_ml.cache import SESSION_CLOSE_HOUR
+
 EASTERN = ZoneInfo("America/New_York")
 TRADING_DAYS = 252
 VOL_WINDOW = 20
 MIN_HISTORY = 252
-SESSION_CLOSE_HOUR = 16
 # Anything else means the order is still working and its shares are not in
 # the position count yet.
 SETTLED_STATUS = frozenset({"Filled", "Cancelled", "ApiCancelled", "Inactive"})

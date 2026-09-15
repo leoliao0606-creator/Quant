@@ -105,6 +105,19 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--what-to-show",
+        default="TRADES",
+        choices=("TRADES", "ADJUSTED_LAST", "MIDPOINT", "BID", "ASK"),
+        help=(
+            "What the bars measure. TRADES is the traded price and carries "
+            "no dividends; ADJUSTED_LAST adds them back. This used not to be "
+            "stated at all and the TRADES default was taken silently, which "
+            "is how unadjusted bars could land in an adjusted cache "
+            "directory. A directory now holds one kind and refuses the "
+            "other, so changing this needs a different --cache-dir."
+        ),
+    )
+    parser.add_argument(
         "--resample-to",
         default=None,
         help=(
@@ -260,6 +273,7 @@ def main() -> None:
                 bar_size=market_config.bar_size,
                 use_rth=market_config.use_rth,
                 max_duration_per_request=market_config.max_duration_per_request,
+                what_to_show=args.what_to_show,
             )
         except Exception as exc:
             raise RuntimeError(
@@ -288,6 +302,7 @@ def main() -> None:
         max_duration_per_request=market_config.max_duration_per_request,
         cache_dir=Path(args.cache_dir) if args.cache_dir else None,
         refresh_cache=args.refresh_cache,
+        what_to_show=args.what_to_show,
         connect=lambda: connect_ib(connection_config),
         fetch_one=fetch_one,
     )

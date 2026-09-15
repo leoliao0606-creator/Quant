@@ -17,7 +17,9 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .features import parse_bar_timestamps
+from zoneinfo import ZoneInfo
+
+from .features import parse_bar_timestamps, to_eastern_naive
 
 
 def _load_pandas():
@@ -47,8 +49,15 @@ def _paths(cache_dir: Path, key: str) -> tuple[Path, Path]:
 
 
 # Nothing inside a cached CSV says whether dividends are in the prices, so the
-# answer lives in one marker file per directory, written by fetch_assets.py.
+# answer lives in one marker file per directory, written by save_cached_frame
+# on every write. fetch_assets.py also checks it before downloading anything,
+# to fail before holding a TWS session rather than after.
 WHAT_TO_SHOW_MARKER = ".what_to_show"
+
+# Regular trading ends at 16:00 Eastern. A daily bar stamped today, read
+# before then, covers only part of its session.
+SESSION_CLOSE_HOUR = 16
+EASTERN = ZoneInfo("America/New_York")
 
 
 def cache_kind(cache_dir) -> str:
@@ -85,6 +94,74 @@ def require_adjusted(cache_dir, purpose: str = "") -> None:
         f"fetch_assets.py --what-to-show ADJUSTED_LAST 重新下载。")
 
 
+def drop_partial_session(frame, bar_size: str, now=None):
+    """Drop a daily bar for a session that is still trading.
+
+    IBKR hands back a partial bar for the session in progress, and once it is
+    written to the cache nothing distinguishes it from a finished day.
+    Measured on this repo's own cache: data_cache_adj was fetched at
+    2026-09-11T16:49 UTC, which is 12:49 Eastern, and SPY's bar for that day
+    carried 12,365,241 shares against 21.6M to 28.8M on the five days before
+    it, with a high-low range of 2.78 against 3.47 to 6.58. 12:49 is 51% of a
+    6.5 hour session and the volume ratio was 49%, so that bar was half a day
+    recorded as a whole one.
+
+    Ten scripts read that cache and none of them dropped it. Doing it here, at
+    the one place bars are written, is what keeps a backtest run at noon and
+    the same backtest run after the close from disagreeing - and portfolio
+    volatility read off a half-session looks calmer than the market is, which
+    is the direction that sizes a book too large.
+
+    Daily bars only. An intraday bar size has its own notion of a partial bar,
+    and none of the backtests read one.
+    """
+    pd = _load_pandas()
+    if bar_size != "1 day" or frame is None or len(frame) == 0:
+        return frame, False
+    now = now or datetime.now(EASTERN)
+    last = to_eastern_naive(frame["timestamp"]).iloc[-1]
+    if pd.isna(last):
+        return frame, False
+    unfinished = last.date() > now.date() or (
+        last.date() == now.date() and now.hour < SESSION_CLOSE_HOUR)
+    return (frame.iloc[:-1], True) if unfinished else (frame, False)
+
+
+def claim_cache_kind(cache_dir, what_to_show: str) -> None:
+    """Mark the directory with what it holds, or refuse to mix two kinds.
+
+    require_adjusted reads this marker to decide whether a cache carries
+    dividends. fetch_assets.py wrote it and refused to mix two kinds, but it
+    did so on its own, before its own download, so the guard covered only the
+    path that went through fetch_assets.py. train_model.py does not: it calls
+    fetch_frames, which calls save_cached_frame directly, and it passed no
+    what_to_show at all (train_model.py:256), taking fetch_historical_frame's
+    TRADES default (ibkr_ml/data.py:584) into whatever --cache-dir named. So
+    `train_model.py --cache-dir data_cache_adj` wrote unadjusted bars into the
+    adjusted directory, left the marker saying ADJUSTED_LAST, and every later
+    require_adjusted passed.
+
+    Writing the marker here, at the one place bars reach the disk, makes the
+    claim and the contents the same act. A directory holds one kind, and a
+    run that would mix them stops instead - by whichever path it arrived.
+    """
+    if not what_to_show:
+        raise SystemExit("写缓存必须说明 what_to_show，空值无法标记")
+    existing = cache_kind(cache_dir)
+    if not existing:
+        (Path(cache_dir) / WHAT_TO_SHOW_MARKER).write_text(
+            what_to_show + "\n", encoding="utf-8")
+        return
+    if existing != what_to_show:
+        raise SystemExit(
+            f"{cache_dir} 里已有的数据是 {existing} 取的，这次要写的是 "
+            f"{what_to_show} 取的，两种不能放在同一个目录。\n"
+            f"TRADES 是成交价，不含分红；ADJUSTED_LAST 含。混在一个目录之后，"
+            f"没有任何办法分辨哪根K线是哪种，而 AGG 这类标的两者差约 2.8 "
+            f"个百分点/年。\n"
+            f"换一个 --cache-dir，或者先清空这个目录再重新下载。")
+
+
 def load_cached_frame(cache_dir, symbol: str, duration: str, bar_size: str, use_rth: bool):
     """Return the cached frame and its metadata, or (None, None) when absent."""
     pd = _load_pandas()
@@ -109,9 +186,20 @@ def load_cached_frame(cache_dir, symbol: str, duration: str, bar_size: str, use_
     return frame, metadata
 
 
-def save_cached_frame(cache_dir, symbol: str, duration: str, bar_size: str, use_rth: bool, frame) -> Path:
+def save_cached_frame(cache_dir, symbol: str, duration: str, bar_size: str,
+                      use_rth: bool, frame, *, what_to_show: str) -> Path:
+    """Write bars to the cache, declaring what kind of bars they are.
+
+    `what_to_show` is keyword-only and has no default on purpose: a default
+    here would be exactly the silent TRADES that got into an adjusted
+    directory in the first place. Every caller has to say what it fetched.
+    """
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
+    claim_cache_kind(cache_dir, what_to_show)
+    frame, dropped = drop_partial_session(frame, bar_size)
+    if dropped:
+        print(f"  {symbol}: 丢掉当日未收盘的半截K线，缓存只存完整交易日")
     data_path, meta_path = _paths(cache_dir, cache_key(symbol, duration, bar_size, use_rth))
 
     # Store timezone-aware timestamps as UTC so the file has one offset. A
@@ -128,6 +216,7 @@ def save_cached_frame(cache_dir, symbol: str, duration: str, bar_size: str, use_
         "duration": duration,
         "bar_size": bar_size,
         "use_rth": bool(use_rth),
+        "what_to_show": what_to_show,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "row_count": int(len(frame)),
         "first_timestamp": str(frame["timestamp"].iloc[0]) if len(frame) else None,
@@ -161,6 +250,7 @@ def fetch_frames(
     refresh_cache: bool = False,
     connect,
     fetch_one,
+    what_to_show: str,
     stale_after_days: float = 3.0,
 ):
     """Return {symbol: frame}, reading the cache and fetching only what is missing.
@@ -207,7 +297,9 @@ def fetch_frames(
             frame = fetch_one(ib, symbol)
             frames[symbol] = frame
             if cache_dir is not None:
-                path = save_cached_frame(cache_dir, symbol, duration, bar_size, use_rth, frame)
+                path = save_cached_frame(cache_dir, symbol, duration, bar_size,
+                                        use_rth, frame,
+                                        what_to_show=what_to_show)
                 print(f"  cached {len(frame)} rows to {path}")
     finally:
         ib.disconnect()

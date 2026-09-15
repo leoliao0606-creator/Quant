@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
+from zoneinfo import ZoneInfo
+
 import pandas as pd
 import pytest
 
@@ -19,6 +21,8 @@ from ibkr_ml.cache import (
     cache_age_days,
     cache_key,
     cache_kind,
+    claim_cache_kind,
+    drop_partial_session,
     fetch_frames,
     load_cached_frame,
     require_adjusted,
@@ -75,6 +79,7 @@ def run_fetch(recorder, symbols, cache_dir, refresh=False):
         refresh_cache=refresh,
         connect=recorder.connect,
         fetch_one=recorder.fetch_one,
+        what_to_show="TRADES",
     )
 
 
@@ -95,7 +100,8 @@ class TestCacheKey:
 class TestRoundTrip:
     def test_a_saved_frame_comes_back_unchanged(self, tmp_path):
         frame = sample_frame(rows=10)
-        save_cached_frame(tmp_path, "SPY", "30 D", "5 mins", True, frame)
+        save_cached_frame(tmp_path, "SPY", "30 D", "5 mins", True, frame,
+                          what_to_show="TRADES")
         loaded, metadata = load_cached_frame(tmp_path, "SPY", "30 D", "5 mins", True)
 
         pd.testing.assert_frame_equal(loaded, frame, check_dtype=False)
@@ -107,8 +113,8 @@ class TestRoundTrip:
         assert loaded is None and metadata is None
 
     def test_different_parameters_do_not_collide(self, tmp_path):
-        save_cached_frame(tmp_path, "SPY", "30 D", "5 mins", True, sample_frame(rows=3))
-        save_cached_frame(tmp_path, "SPY", "60 D", "5 mins", True, sample_frame(rows=7))
+        save_cached_frame(tmp_path, "SPY", "30 D", "5 mins", True, sample_frame(rows=3), what_to_show="TRADES")
+        save_cached_frame(tmp_path, "SPY", "60 D", "5 mins", True, sample_frame(rows=7), what_to_show="TRADES")
 
         short, _ = load_cached_frame(tmp_path, "SPY", "30 D", "5 mins", True)
         long, _ = load_cached_frame(tmp_path, "SPY", "60 D", "5 mins", True)
@@ -116,7 +122,7 @@ class TestRoundTrip:
         assert len(long) == 7
 
     def test_corrupt_metadata_does_not_hide_the_bars(self, tmp_path):
-        save_cached_frame(tmp_path, "SPY", "30 D", "5 mins", True, sample_frame())
+        save_cached_frame(tmp_path, "SPY", "30 D", "5 mins", True, sample_frame(), what_to_show="TRADES")
         meta_path = next(tmp_path.glob("*.json"))
         meta_path.write_text("{ not json", encoding="utf-8")
 
@@ -170,6 +176,7 @@ class TestFetchFrames:
                 refresh_cache=False,
                 connect=recorder.connect,
                 fetch_one=failing_fetch,
+                what_to_show="TRADES",
             )
         assert recorder.broker.disconnected
 
@@ -185,6 +192,7 @@ class TestFetchFrames:
             refresh_cache=False,
             connect=recorder.connect,
             fetch_one=recorder.fetch_one,
+            what_to_show="TRADES",
         )
         assert list(tmp_path.iterdir()) == []
 
@@ -194,7 +202,7 @@ class TestFetchFrames:
         assert list(frames) == ["SPY", "QQQ", "IWM"]
 
     def test_a_stale_cache_is_used_and_flagged(self, tmp_path, capsys):
-        save_cached_frame(tmp_path, "SPY", "30 D", "5 mins", True, sample_frame())
+        save_cached_frame(tmp_path, "SPY", "30 D", "5 mins", True, sample_frame(), what_to_show="TRADES")
         meta_path = next(tmp_path.glob("*.json"))
         metadata = json.loads(meta_path.read_text(encoding="utf-8"))
         metadata["fetched_at"] = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
@@ -312,3 +320,189 @@ class TestWhatToShowMarker:
 
     def test_a_string_path_works_as_well_as_a_path_object(self, tmp_path):
         require_adjusted(str(self.mark(tmp_path, "ADJUSTED_LAST")))
+
+
+class TestClaimCacheKind:
+    """The marker has to be written where the bars are, not beside them.
+
+    fetch_assets.py wrote the marker and refused to mix two kinds, but only
+    for downloads that went through fetch_assets.py. train_model.py does not:
+    it calls fetch_frames, which calls save_cached_frame directly, and it
+    passed no what_to_show at all, taking fetch_historical_frame's TRADES
+    default into whatever --cache-dir named. So `train_model.py --cache-dir
+    data_cache_adj` put unadjusted bars in the adjusted directory, left the
+    marker saying ADJUSTED_LAST, and every later require_adjusted passed.
+    """
+
+    def test_an_unmarked_directory_gets_marked(self, tmp_path):
+        claim_cache_kind(tmp_path, "ADJUSTED_LAST")
+        assert cache_kind(tmp_path) == "ADJUSTED_LAST"
+
+    def test_claiming_the_same_kind_again_is_fine(self, tmp_path):
+        claim_cache_kind(tmp_path, "TRADES")
+        claim_cache_kind(tmp_path, "TRADES")
+        assert cache_kind(tmp_path) == "TRADES"
+
+    def test_a_second_kind_is_refused(self, tmp_path):
+        claim_cache_kind(tmp_path, "ADJUSTED_LAST")
+        with pytest.raises(SystemExit) as caught:
+            claim_cache_kind(tmp_path, "TRADES")
+        assert "ADJUSTED_LAST" in str(caught.value)
+        assert "TRADES" in str(caught.value)
+
+    def test_the_refusal_leaves_the_marker_alone(self, tmp_path):
+        claim_cache_kind(tmp_path, "ADJUSTED_LAST")
+        with pytest.raises(SystemExit):
+            claim_cache_kind(tmp_path, "TRADES")
+        assert cache_kind(tmp_path) == "ADJUSTED_LAST"
+
+    def test_an_empty_kind_is_refused(self, tmp_path):
+        with pytest.raises(SystemExit):
+            claim_cache_kind(tmp_path, "")
+        assert cache_kind(tmp_path) == ""
+
+
+class TestSaveDeclaresItsKind:
+    def test_saving_marks_the_directory(self, tmp_path):
+        save_cached_frame(tmp_path, "SPY", "30 D", "5 mins", True,
+                          sample_frame(), what_to_show="ADJUSTED_LAST")
+        assert cache_kind(tmp_path) == "ADJUSTED_LAST"
+        require_adjusted(tmp_path)          # now passes on its own evidence
+
+    def test_the_kind_is_recorded_in_the_sidecar_too(self, tmp_path):
+        save_cached_frame(tmp_path, "SPY", "30 D", "5 mins", True,
+                          sample_frame(), what_to_show="ADJUSTED_LAST")
+        _, metadata = load_cached_frame(tmp_path, "SPY", "30 D", "5 mins", True)
+        assert metadata["what_to_show"] == "ADJUSTED_LAST"
+
+    def test_traded_bars_cannot_be_written_into_an_adjusted_directory(self, tmp_path):
+        """Now refused at the write, whichever caller got here."""
+        save_cached_frame(tmp_path, "SPY", "30 D", "5 mins", True,
+                          sample_frame(), what_to_show="ADJUSTED_LAST")
+        with pytest.raises(SystemExit) as caught:
+            save_cached_frame(tmp_path, "AGG", "30 D", "5 mins", True,
+                              sample_frame(), what_to_show="TRADES")
+        assert "2.8" in str(caught.value)
+
+    def test_the_refused_write_leaves_no_bars_behind(self, tmp_path):
+        save_cached_frame(tmp_path, "SPY", "30 D", "5 mins", True,
+                          sample_frame(), what_to_show="ADJUSTED_LAST")
+        with pytest.raises(SystemExit):
+            save_cached_frame(tmp_path, "AGG", "30 D", "5 mins", True,
+                              sample_frame(), what_to_show="TRADES")
+        frame, _ = load_cached_frame(tmp_path, "AGG", "30 D", "5 mins", True)
+        assert frame is None
+
+    def test_a_missing_kind_is_a_type_error_not_a_silent_default(self):
+        """A default here would be the silent TRADES that caused this."""
+        with pytest.raises(TypeError):
+            save_cached_frame("unused", "SPY", "30 D", "5 mins", True, None)
+
+
+class TestFetchFramesDeclaresItsKind:
+    def test_fetched_bars_mark_the_directory(self, tmp_path):
+        recorder = Recorder()
+        fetch_frames(symbols=["SPY"], duration="30 D", bar_size="5 mins",
+                     use_rth=True, max_duration_per_request=None,
+                     cache_dir=tmp_path, refresh_cache=False,
+                     connect=recorder.connect, fetch_one=recorder.fetch_one,
+                     what_to_show="ADJUSTED_LAST")
+        assert cache_kind(tmp_path) == "ADJUSTED_LAST"
+
+    def test_the_train_model_path_cannot_pollute_an_adjusted_cache(self, tmp_path):
+        """train_model.py:283's call, with the TRADES default it used to take."""
+        claim_cache_kind(tmp_path, "ADJUSTED_LAST")
+        recorder = Recorder()
+        with pytest.raises(SystemExit) as caught:
+            fetch_frames(symbols=["SPY"], duration="30 D", bar_size="5 mins",
+                         use_rth=True, max_duration_per_request=None,
+                         cache_dir=tmp_path, refresh_cache=False,
+                         connect=recorder.connect,
+                         fetch_one=recorder.fetch_one, what_to_show="TRADES")
+        assert "ADJUSTED_LAST" in str(caught.value)
+
+    def test_a_missing_kind_is_a_type_error(self, tmp_path):
+        recorder = Recorder()
+        with pytest.raises(TypeError):
+            fetch_frames(symbols=["SPY"], duration="30 D", bar_size="5 mins",
+                         use_rth=True, max_duration_per_request=None,
+                         cache_dir=tmp_path, refresh_cache=False,
+                         connect=recorder.connect, fetch_one=recorder.fetch_one)
+
+
+def daily_frame(dates, volume=25_000_000.0):
+    return pd.DataFrame({
+        "timestamp": [pd.Timestamp(d, tz="America/New_York") for d in dates],
+        "open": [100.0] * len(dates), "high": [101.0] * len(dates),
+        "low": [99.0] * len(dates), "close": [100.5] * len(dates),
+        "volume": [volume] * len(dates),
+    })
+
+
+NOON = datetime(2026, 9, 11, 12, 49, tzinfo=ZoneInfo("America/New_York"))
+AFTER_CLOSE = datetime(2026, 9, 11, 16, 49, tzinfo=ZoneInfo("America/New_York"))
+
+
+class TestDropPartialSession:
+    """A bar for a session still trading is half a day recorded as a whole one.
+
+    Measured on this repo's own cache: data_cache_adj was fetched at 12:49
+    Eastern on 2026-09-11 and SPY's bar for that day carried 12.4M shares
+    against 21.6M-28.8M on the five days before, range 2.78 against 3.47-6.58.
+    Ten scripts read that cache and none of them dropped it.
+    """
+
+    def test_a_bar_for_a_session_still_trading_is_dropped(self):
+        frame = daily_frame(["2026-09-10", "2026-09-11"])
+        kept, dropped = drop_partial_session(frame, "1 day", NOON)
+        assert dropped is True and len(kept) == 1
+
+    def test_the_same_bar_after_the_close_is_kept(self):
+        frame = daily_frame(["2026-09-10", "2026-09-11"])
+        kept, dropped = drop_partial_session(frame, "1 day", AFTER_CLOSE)
+        assert dropped is False and len(kept) == 2
+
+    def test_a_bar_from_a_previous_session_is_always_kept(self):
+        frame = daily_frame(["2026-09-09", "2026-09-10"])
+        kept, dropped = drop_partial_session(frame, "1 day", NOON)
+        assert dropped is False and len(kept) == 2
+
+    def test_a_bar_stamped_in_the_future_is_dropped(self):
+        frame = daily_frame(["2026-09-11", "2026-09-14"])
+        kept, dropped = drop_partial_session(frame, "1 day", NOON)
+        assert dropped is True and len(kept) == 1
+
+    def test_intraday_bars_are_left_alone(self):
+        """A five-minute bar has its own notion of partial, and no backtest
+        in this project reads one."""
+        frame = daily_frame(["2026-09-10", "2026-09-11"])
+        kept, dropped = drop_partial_session(frame, "5 mins", NOON)
+        assert dropped is False and len(kept) == 2
+
+    def test_an_empty_frame_is_returned_unchanged(self):
+        frame = daily_frame([])
+        kept, dropped = drop_partial_session(frame, "1 day", NOON)
+        assert dropped is False and len(kept) == 0
+
+    def test_saving_at_noon_stores_only_finished_sessions(self, tmp_path):
+        """The end-to-end case: what fetch_assets.py did on 2026-09-11."""
+        frame = daily_frame(["2026-09-10", "2026-09-11"])
+        import ibkr_ml.cache as cache_module
+
+        real = cache_module.datetime
+
+        class FrozenNoon(real):
+            @classmethod
+            def now(cls, tz=None):
+                return NOON
+
+        cache_module.datetime = FrozenNoon
+        try:
+            save_cached_frame(tmp_path, "SPY", "20 Y", "1 day", True, frame,
+                              what_to_show="ADJUSTED_LAST")
+        finally:
+            cache_module.datetime = real
+        stored, metadata = load_cached_frame(tmp_path, "SPY", "20 Y", "1 day", True)
+        assert len(stored) == 1
+        assert metadata["row_count"] == 1
+        assert str(metadata["last_timestamp"])[:10] == "2026-09-10"

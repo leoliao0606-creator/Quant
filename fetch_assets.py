@@ -26,7 +26,7 @@ import argparse
 import time
 from pathlib import Path
 
-from ibkr_ml.cache import load_cached_frame, save_cached_frame
+from ibkr_ml.cache import claim_cache_kind, load_cached_frame, save_cached_frame
 from ibkr_ml.config import IBKRConnectionConfig
 from ibkr_ml.data import connect_ib, fetch_historical_frame
 
@@ -67,18 +67,13 @@ def main() -> None:
     args = parser.parse_args()
 
     cache = Path(args.cache_dir)
-    # Nothing in the cached CSV or its sidecar says whether dividends are in
-    # the prices, and mixing the two kinds in one directory is silent and
-    # unrecoverable. Stamp the directory, and refuse to mix.
+    # save_cached_frame makes this same claim on every write, which is what
+    # covers the paths that never come through here (train_model.py reaches
+    # save_cached_frame via fetch_frames). Claiming it up front as well means
+    # a mismatch stops before a TWS session is opened and held, rather than
+    # after the first symbol has already been pulled.
     cache.mkdir(parents=True, exist_ok=True)
-    marker = cache / ".what_to_show"
-    existing = marker.read_text().strip() if marker.exists() else ""
-    if existing and existing != args.what_to_show:
-        raise SystemExit(
-            f"{cache} 里已经是 {existing} 取的数据，现在要写 "
-            f"{args.what_to_show}，两种混在一个目录里没法分辨。"
-            f"换一个 --cache-dir。")
-    marker.write_text(args.what_to_show + "\n")
+    claim_cache_kind(cache, args.what_to_show)
 
     pending = []
     for symbol in args.symbols:
@@ -108,7 +103,9 @@ def main() -> None:
                         bar_size="1 day", use_rth=True,
                         max_duration_per_request=args.duration,
                         what_to_show=args.what_to_show)
-                    save_cached_frame(cache, symbol, args.duration, "1 day", True, frame)
+                    save_cached_frame(cache, symbol, args.duration, "1 day",
+                                      True, frame,
+                                      what_to_show=args.what_to_show)
                     print(f"{symbol}: {len(frame)} 行  "
                           f"{frame['timestamp'].min().date()} 起", flush=True)
                     done += 1
