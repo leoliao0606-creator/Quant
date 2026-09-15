@@ -1538,6 +1538,12 @@ The conclusion survives, but only because the operating instruction
 changed from monthly to weekly. Run monthly, the honest line would have
 been Sharpe 0.62 against 0.63 for doing nothing.
 
+**Read these four numbers with finding 10 below.** The 0.72 is one draw
+from a range of 0.687-0.726 that depends on which session the data happens
+to start at; the median is 0.717 and the overlay's gain over no overlay is
++0.08, between +0.05 and +0.09, positive at all 21 starts tested. The gain
+is the durable part. The single figure is not.
+
 ### Paper trading started
 
 2026-09-11, account DUP430517. The account already held 729,752 dollars
