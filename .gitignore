@@ -13,3 +13,4 @@ logs_test/
 .pytest_cache/
 tests/__pycache__/
 data_cache/
+data_cache_yahoo/
