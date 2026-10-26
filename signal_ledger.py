@@ -16,7 +16,10 @@ created:
 - Entry and exit are ibkr_ml.signals.simulate_plan's, so a position here
   is filled and closed exactly where the dashboard's "as planned" column
   says. With `use_levels` the report's limit, stop and target are honoured;
-  without, the entry is the open and the exit is the horizon.
+  without, the entry is the open and the exit is the horizon. The horizon
+  is the report's horizon_days in calendar days, except for a task in
+  signals.SESSION_HORIZONS: the short task holds exactly
+  `default_sessions` sessions, because that is what it predicts.
 - A later sell, avoid or risk call from the same task on a name the book
   holds closes it at the open of that call's entry session.
 - Fills pay `cost_bps` a side; idle cash earns SGOV; dividends are cash on
@@ -75,10 +78,12 @@ def run_ledger(state, records, bars_for, now):
     bars and must also answer for SPY and SGOV. Pure apart from those
     reads, which is what lets the tests drive it with invented prices.
     """
-    from ibkr_ml.signals import EXIT_ACTIONS, LONG_ACTIONS, entry_session, simulate_plan
+    from ibkr_ml.signals import (EXIT_ACTIONS, LONG_ACTIONS, SESSION_HORIZONS,
+                                 entry_session, simulate_plan)
 
     state = json.loads(json.dumps(state))
     params = state["params"]
+    use_item_horizon = params["task"] not in SESSION_HORIZONS
     created = datetime.fromisoformat(state["created"])
     benchmark, proxy = bars_for(BENCHMARK), bars_for(CASH_PROXY)
     if benchmark is None or proxy is None:
@@ -106,7 +111,8 @@ def run_ledger(state, records, bars_for, now):
         if key not in plans:
             plans[key] = simulate_plan(item, received, bars_for(item["ticker"]), benchmark,
                                        use_levels=params["use_levels"],
-                                       default_sessions=params["default_sessions"])
+                                       default_sessions=params["default_sessions"],
+                                       use_item_horizon=use_item_horizon)
         return plans[key]
 
     rate = params["cost_bps"] / 1e4

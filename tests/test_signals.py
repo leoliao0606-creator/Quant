@@ -366,3 +366,38 @@ class TestControls:
         rows = [{"key": "a", "direction": 1, "entry_session": "2026-10-26",
                  "checkpoints": {"5": {"excess": 0.0, "signed": 0.0}}}]
         assert random_control(rows, universe, spy(5), 5, draws=99)["pool"] == 2
+
+
+class TestSessionHorizon:
+    STOCK = bars(DAYS + ["2026-11-02"], [100] * 6, [100, 101, 102, 103, 104, 110])
+    SPY = bars(DAYS + ["2026-11-02"], [500] * 6, [500] * 6)
+
+    def test_a_short_call_is_judged_at_the_fifth_session_close(self):
+        item = {**GOOD, "action": "buy", "horizon_days": 7}
+        rows = score_inbox([{"key": "a", "received": "2026-10-26T08:00:00-04:00",
+                             "task": "short", "items": [item]}],
+                           lambda t: self.SPY if t == "SPY" else self.STOCK)
+        (row,) = rows
+        assert row["through"] == "2026-10-30" and row["status"] == "已到期"
+        assert row["return"] == pytest.approx(0.04)
+        assert row["plan"]["exit_session"] == "2026-10-30"
+
+    def test_a_daily_call_keeps_its_calendar_horizon(self):
+        item = {**GOOD, "action": "buy", "horizon_days": 7, "entry_limit": None,
+                "stop": None, "target": None}
+        rows = score_inbox([{"key": "a", "received": "2026-10-26T08:00:00-04:00",
+                             "task": "daily", "items": [item]}],
+                           lambda t: self.SPY if t == "SPY" else self.STOCK)
+        assert rows[0]["through"] == "2026-11-02"
+
+
+class TestBatchPaste:
+    def test_several_radar_outputs_pasted_at_once_are_separate_reports(self, tmp_path):
+        first = block([{"ticker": "NVDA", "action": "risk", "score": 7}], task="radar")
+        second = block([{"ticker": "SLB", "action": "opportunity", "score": 8}], task="radar")
+        repeat = block([{"ticker": "NVDA", "action": "risk", "score": 7}], task="radar")
+        text = "\n\n---\n\n".join([first, second, repeat])
+        result = ingest(text, tmp_path, datetime(2026, 10, 27, 8, 50, tzinfo=EASTERN),
+                        expected_task="radar")
+        assert len(result["added"]) == 2 and result["duplicates"] == 1
+        assert [r["items"][0]["ticker"] for r in load_inbox(tmp_path)] == ["NVDA", "SLB"]

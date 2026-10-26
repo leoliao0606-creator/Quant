@@ -80,6 +80,11 @@ EXIT_ACTIONS = ("sell", "avoid", "risk")
 LIMIT_VALID_SESSIONS = 5
 # Holding period for a plan that names none.
 DEFAULT_HOLD_SESSIONS = 20
+# Tasks whose target is defined in sessions, not calendar days. The short
+# task predicts "today's open to the 5th session's close"; reading its
+# horizon_days of 7 as calendar days would hold a Monday entry to the next
+# Monday - six sessions, one more than was predicted.
+SESSION_HORIZONS = {"short": 5}
 TICKER = re.compile(r"^[A-Z][A-Z0-9-]{0,9}$")
 DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.S)
@@ -288,7 +293,7 @@ def _factor(bars, day):
 
 
 def simulate_plan(item, received, bars, benchmark, use_levels=True,
-                  default_sessions=DEFAULT_HOLD_SESSIONS):
+                  default_sessions=DEFAULT_HOLD_SESSIONS, use_item_horizon=True):
     """The long trade a report laid out, filled and exited on daily bars.
 
     Fixed before any report arrived, and conservative wherever a daily bar
@@ -306,8 +311,9 @@ def simulate_plan(item, received, bars, benchmark, use_levels=True,
       the bar cannot say whether its low came before or after the fill, so
       the losing order is assumed.
     - Horizon. `horizon_days` calendar days after the fill, exiting at the
-      close of the first session on or after it; without one,
-      `default_sessions` sessions.
+      close of the first session on or after it; without one, or with
+      `use_item_horizon` off, the close of the `default_sessions`-th
+      session counting the fill session as the first.
     - A stop at or above the fill, or a target at or below it, cannot have
       been meant and is ignored with a note.
 
@@ -351,7 +357,7 @@ def simulate_plan(item, received, bars, benchmark, use_levels=True,
     if target is not None and target <= fill_price:
         target = None
         notes.append("目标价不高于成交价，已忽略")
-    horizon = item.get("horizon_days")
+    horizon = item.get("horizon_days") if use_item_horizon else None
     due = fill_day + timedelta(days=horizon) if horizon else None
 
     held = sessions[sessions >= fill_day]
@@ -395,8 +401,12 @@ def simulate_plan(item, received, bars, benchmark, use_levels=True,
             "return": own, "spy_return": market, "excess": own - market, "notes": notes}
 
 
-def score_item(item, received, bars, benchmark):
-    """Excess over SPY from the entry open, at each checkpoint and so far."""
+def score_item(item, received, bars, benchmark, hold_sessions=None):
+    """Excess over SPY from the entry open, at each checkpoint and so far.
+
+    `hold_sessions` replaces the item's calendar horizon with a count of
+    sessions, for a task whose target is defined that way.
+    """
     direction = ACTIONS[item["action"]]
     row = {"ticker": item["ticker"], "action": item["action"], "direction": direction,
            "score": item.get("score"), "horizon_days": item.get("horizon_days"),
@@ -412,7 +422,10 @@ def score_item(item, received, bars, benchmark):
         row["status"] = "没有 SPY 数据"
         return row
     if item["action"] in LONG_ACTIONS:
-        row["plan"] = simulate_plan(item, received, bars, benchmark)
+        row["plan"] = simulate_plan(
+            item, received, bars, benchmark,
+            default_sessions=hold_sessions or DEFAULT_HOLD_SESSIONS,
+            use_item_horizon=hold_sessions is None)
     entry = entry_session(bars.index, received)
     if entry is None or entry not in benchmark.index:
         return row
@@ -437,7 +450,10 @@ def score_item(item, received, bars, benchmark):
 
     horizon = item.get("horizon_days")
     expired = False
-    if horizon:
+    if hold_sessions:
+        expired = len(span) >= hold_sessions
+        span = span[:hold_sessions]
+    elif horizon:
         due = entry + timedelta(days=horizon)
         expired = span[-1] >= due
         span = span[span <= due]
@@ -462,7 +478,8 @@ def score_inbox(records, bars_for):
     for record in sorted(records, key=lambda r: r["received"], reverse=True):
         received = datetime.fromisoformat(record["received"])
         for item in record["items"]:
-            row = score_item(item, received, bars_for(item["ticker"]), benchmark)
+            row = score_item(item, received, bars_for(item["ticker"]), benchmark,
+                             hold_sessions=SESSION_HORIZONS.get(record["task"]))
             row.update({"received": record["received"], "task": record["task"],
                         "key": record["key"]})
             rows.append(row)

@@ -126,3 +126,13 @@ class TestLedger:
         _, events = run_ledger(ledger(), [], bars(), NOW)
         first = of_type(events, "mark")[0]
         assert first["interest"] == pytest.approx(100000.0 * 0.0002)
+
+    def test_the_short_ledger_holds_five_sessions_not_seven_calendar_days(self):
+        # A Monday entry with horizon_days 7 would run to the next Monday:
+        # six sessions. The short task predicts five, so it sells on Friday.
+        item = {**buy("AAA"), "horizon_days": 7}
+        state, events = run_ledger(ledger("short"), [report(MONDAY_EARLY, [item], task="short")],
+                                   bars(AAA=flat(50.0)), NOW)
+        sell = [e for e in of_type(events, "fill") if e["side"] == "SELL"][0]
+        assert sell["session"] == "2026-10-30" and sell["reason"] == "到期"
+        assert state["positions"] == {}
