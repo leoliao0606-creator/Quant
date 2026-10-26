@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>模拟账本</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+  <header class="top">
+    <h1>模拟账本</h1>
+    <span class="tag" id="tag"></span>
+    <div class="pills">
+      <span class="pill" id="market"><span class="dot"></span><span id="market-text">读取中</span></span>
+      <span class="pill" id="quote-time">报价 —</span>
+      <span class="pill" id="booked">账本 —</span>
+    </div>
+  </header>
+
+  <section class="card hero" id="hero">
+    <div class="label" id="hero-label">账户净值</div>
+    <div class="value" id="hero-value">—</div>
+    <div class="delta" id="hero-delta"></div>
+    <div class="note" id="hero-note"></div>
+  </section>
+
+  <section class="tiles" id="tiles"></section>
+
+  <section class="card" id="chart-card">
+    <div class="chart-head">
+      <div>
+        <h2>净值走势（起点 = 100）</h2>
+        <p class="sub" id="chart-sub">三条线都换算成起点等于 100，用同一个刻度比较</p>
+      </div>
+      <div class="legend">
+        <span><i class="key k1"></i>模拟账户</span>
+        <span><i class="key k2"></i>SPY（标普 500，含分红）</span>
+        <span><i class="key k3"></i>SGOV（短期国债，含分红）</span>
+      </div>
+      <div class="toggle" role="group" aria-label="显示方式">
+        <button type="button" id="show-chart" aria-pressed="true">图表</button>
+        <button type="button" id="show-table" aria-pressed="false">表格</button>
+      </div>
+    </div>
+    <div class="chart" id="chart"></div>
+    <div class="table-wrap" id="chart-table" hidden></div>
+  </section>
+
+  <div class="two">
+    <section class="card" id="positions-card">
+      <h2>持仓</h2>
+      <p class="sub" id="positions-sub"></p>
+      <div class="table-wrap" id="positions"></div>
+    </section>
+    <section class="card" id="events-card">
+      <h2>最近事件</h2>
+      <p class="sub">决策、成交、分红，最新的在上面</p>
+      <ul class="events" id="events"></ul>
+    </section>
+  </div>
+
+  <section class="card" id="signals-card">
+    <h2>ChatGPT 报告</h2>
+    <p class="sub">每个定时任务一个标签页，各自导入、各自统计。整段粘贴报告，末尾要有 ```json 代码块。时间按粘贴的时刻记，入场价是之后第一个开盘价。</p>
+    <div class="tabs" role="tablist" id="task-tabs"></div>
+    <div id="task-panels"></div>
+  </section>
+
+  <footer>
+    <p>账本每个交易日收盘后由 run_sim_daily.sh 记账一次；周五决策只用到周四为止的数据，按周五收盘价成交，每边扣 5 bp 成本。</p>
+    <p>盘中显示的净值按 Yahoo 最新报价估算，不写进账本。Yahoo 的接口不是官方公开 API，报价可能延迟或中断。</p>
+    <p>ChatGPT 报告目前按"开盘买入、一直持有"计分，限价、止损、目标价只记录不模拟。超额 = 这只股票的收益减去同期 SPY 的收益。</p>
+    <p>t 值是平均值除以它的标准误差，大约到 2 以上才说明结果不太像偶然。秩相关只比较排名先后：0 表示分数高低和之后表现无关，正数表示分数高的确实表现更好。</p>
+  </footer>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>
