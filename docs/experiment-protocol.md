@@ -1729,3 +1729,119 @@ calendar (month ends, say) instead of to `index[::n]` would make a result
 survive a re-download. Until then, a re-download is a silent re-roll of
 this dice, and `--start` does not pin it - the effective start is whatever
 the earliest row in the cache happens to be.
+
+## Registered before any report: the ChatGPT short task (2026-10-25)
+
+Written before the first report is pasted: `logs/signals/inbox.jsonl` does
+not exist yet. The dashboard prints fourteen numbers per task - excess at
+1, 5, 20 and 60 sessions, the IC at 5 and 20, chosen-against-watch at four
+checkpoints, the plan, the random control at three - and there are three
+tasks. If no report carries any information, about two of those 42 will
+still look significant at 5%. This section names the one that decides.
+
+### What is tested
+
+The "short" task. Every US trading morning before the open, ChatGPT scores
+the same 20 symbols for their excess over SPY from today's open to the
+fifth session's close, today counting as the first:
+
+    NVDA GOOGL TSM META AMZN AAPL AVGO AMD MU ORCL
+    JPM XOM SLB LMT UNH COST SMH XLE XLF IWM
+
+A score of 6.5 or more is a "buy". The prompt, its scale (one point is
+about 0.6pp of expected excess) and the list are frozen from the first
+report. Changing any of them ends this test; reports after the change start
+a new one and need their own registration.
+
+The question: do its buy calls beat the rest of the same list, by enough to
+pay 20 bps a side?
+
+### Which calls count
+
+- `short` reports received at or after the ledger was created (2026-10-25
+  21:11:56 ET), whose entry session - the first regular open at or after
+  the paste - falls from the first counted entry up to, not including, the
+  same date 182 days later.
+- Every item with action `buy` in those reports.
+- A buy whose entry is fewer than five sessions after the last counted buy
+  of the same ticker is dropped. Its window overlaps one already counted;
+  the same name bought five mornings running is one observation, not five.
+  The `chatgpt-short` ledger skips it for the same reason (已持有).
+- An item with no fifth-session close (no prices, a delisting) is listed
+  and dropped.
+- Every report is pasted, including the ones that look wrong. Pasting only
+  the plausible ones would bias the result upward. A report pasted after
+  9:30 counts, with its later entry.
+
+### The measure
+
+For each counted buy, the excess over SPY from the entry-day open to the
+fifth session's close, on dividend-adjusted prices: checkpoint `5` in
+`score_item`. Net of cost, r = excess - 0.40% (20 bps on the buy, 20 on
+the sale, SPY charged nothing).
+
+The control draws, for every counted buy, one of the 20 symbols uniformly
+on the same entry session (the buy's own ticker included) and takes the
+mean excess; 10,000 draws, seed 0. p = (1 + draws at or above the observed
+mean) / 10,001. One-sided. The cost is the same for a random pick, so the
+control is run on gross excess.
+
+Why the 20 and not the 253 companies of `signals_control.py`: the list is
+weighted toward large technology names. If they outrun the market over the
+window, any pick from the list beats a pick from the 253, skill or none.
+The 253 control stays on the dashboard as a secondary number.
+
+### What counts as a pass
+
+All three:
+
+  a. at least 30 counted buys. Fewer is about one a week: too few to judge,
+     and too few to run a ledger on;
+  b. p < 0.05 against the same-list control;
+  c. mean r > 0, that is, positive after 20 bps a side.
+
+### When it is read
+
+Once, after the last counted buy has its fifth close. If the first counted
+entry is 2026-10-26, the window ends 2027-04-25 and the last result closes
+2027-04-29. The dashboard can be read in between, but nothing here changes
+and nothing is decided on an interim number. A close result does not
+extend the window.
+
+### What follows
+
+- Pass: the same rule runs unchanged on a second 182 days of new reports,
+  scored the same way, before any real money follows it.
+- Fail: the short task is not used as a trading signal, and the
+  `chatgpt-short` ledger stops. The same reports are not re-tested with
+  another measure, threshold or subset ("only scores of 8 and up", "only
+  earnings events"). An idea taken from them needs new reports and its
+  own registration.
+
+### Secondary, reported, deciding nothing
+
+- The 5-session IC over all 20 names, which uses the sell and watch scores
+  too. Each morning's window shares four sessions with the next one, so
+  the dashboard's t treats overlapping outcomes as independent and runs
+  too large, by up to about √5 ≈ 2.2.
+- Buy against watch within the same report, the other checkpoints, the
+  253-company control, the plan simulation.
+- Everything about the daily and radar tasks. They hold for 20 sessions,
+  which leaves a few dozen independent outcomes in 182 days; they can
+  suggest what to register next, not establish anything.
+- The three ledgers' equity, at the 5 bps a side they were frozen with.
+
+The reports come from whatever model OpenAI serves that day, and it changes
+without notice. A result describes the task as it ran over these 182 days,
+not a fixed model.
+
+### What is expected
+
+Over 2024-01 to 2026-09, one of the 253 names has a 5-session excess with a
+standard deviation of 4.75%, and names in the same week correlate at 0.089.
+With about 100 counted buys the standard error of the mean is near 0.5%,
+so (b) needs the buys to beat the list by roughly 0.8% every five
+sessions, about 50% a year compounded, and (c) needs 0.4% just to cover
+the cost.
+The most likely outcome is a fail. That is still an answer: it settles
+whether these reports should drive short-term trades.
