@@ -199,3 +199,29 @@ class TestSignalBarsCache:
                             lambda *a, **k: pytest.fail("fetched a cache that already covers"))
         frame = dashboard.bars_for("GOOGL", datetime(2026, 10, 6, tzinfo=EASTERN))
         assert frame.index[0] == pd.Timestamp("2026-10-01")
+
+
+class TestLedgerChoice:
+    def make(self, tmp_path):
+        for name, state in {"thirds": {"name": "thirds", "created": "x"},
+                            "chatgpt-daily": {"name": "chatgpt-daily", "kind": "signals",
+                                              "params": {"task": "daily"}, "created": "y"}}.items():
+            folder = tmp_path / "sim" / name
+            folder.mkdir(parents=True)
+            (folder / "state.json").write_text(json.dumps(state))
+        args = argparse.Namespace(state_dir=str(tmp_path / "sim"), name="thirds",
+                                  cache_dir=str(tmp_path / "cache"),
+                                  signals_dir=str(tmp_path / "signals"))
+        return Dashboard(args)
+
+    def test_every_ledger_folder_is_offered_the_allocation_first(self, tmp_path):
+        listing = self.make(tmp_path).ledgers()
+        assert [row["name"] for row in listing["ledgers"]] == ["thirds", "chatgpt-daily"]
+        assert listing["ledgers"][1]["task"] == "daily"
+
+    def test_a_name_that_is_not_a_ledger_folder_reads_nothing(self, tmp_path):
+        dashboard = self.make(tmp_path)
+        (tmp_path / "secret").mkdir()
+        (tmp_path / "secret" / "state.json").write_text('{"name": "secret"}')
+        assert dashboard.load_state("../secret") is None
+        assert dashboard.load_state("chatgpt-daily")["kind"] == "signals"

@@ -67,7 +67,12 @@ main { max-width: 1180px; margin: 0 auto; padding: 20px 16px 48px; }
 
 header.top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 16px; }
 header.top h1 { font-size: 20px; font-weight: 600; margin: 0; }
-.tag { color: var(--text-2); font-size: 14px; }
+.tag { color: var(--text-2); font-size: 14px; flex-basis: 100%; }
+.ledger-pick { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-2); }
+.ledger-pick select {
+  font: inherit; font-size: 14px; color: var(--text); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 8px; padding: 3px 8px;
+}
 .pills { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
 .pill {
   display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px;
@@ -146,6 +151,8 @@ table { width: 100%; border-collapse: collapse; font-size: 14px; }
 th { text-align: left; font-weight: 600; color: var(--text-2); font-size: 13px; padding: 6px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
 td { padding: 6px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.dense { font-size: 13px; }
+table.dense th, table.dense td { padding: 6px 5px; }
 tr:last-child td { border-bottom: 0; }
 
 .events { list-style: none; margin: 0; padding: 0; max-height: 360px; overflow-y: auto; }

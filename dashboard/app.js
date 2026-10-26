@@ -27,7 +27,8 @@ const TASK_INFO = {
 };
 const ACTION = { buy: "买入", opportunity: "机会", sell: "卖出", avoid: "回避", risk: "风险", watch: "观察" };
 const WEEKDAY = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-const view = { state: null, live: null, signals: null, mode: "chart", task: "daily", panels: {} };
+const view = { state: null, live: null, signals: null, mode: "chart", task: "daily", panels: {},
+  name: null, ledgers: [] };
 
 const $ = (id) => document.getElementById(id);
 
@@ -67,11 +68,31 @@ async function getJSON(url) {
   return payload;
 }
 
+function ledgerLabel(ledger) {
+  if (ledger.kind !== "signals") return `${ledger.name}（每周配置）`;
+  const info = TASK_INFO[ledger.task];
+  return `${ledger.name}（按规则交易「${info ? info.name : ledger.task}」）`;
+}
+
+async function loadLedgers() {
+  const data = await getJSON("/api/ledgers");
+  view.ledgers = data.ledgers;
+  const names = data.ledgers.map((l) => l.name);
+  let saved = null;
+  try { saved = localStorage.getItem("ledger"); } catch (error) { /* private window */ }
+  const asked = new URLSearchParams(location.search).get("ledger");
+  view.name = [asked, saved, data.default].find((n) => names.includes(n)) || names[0] || null;
+  const select = $("ledger");
+  select.replaceChildren(...data.ledgers.map((l) => el("option", { value: l.name, text: ledgerLabel(l) })));
+  if (view.name) select.value = view.name;
+}
+
 async function refresh(kind, ids) {
   const cards = ids.map($).filter(Boolean);
   cards.forEach((c) => c.classList.add("refreshing"));
+  const scoped = (kind === "state" || kind === "live") && view.name;
   try {
-    view[kind] = await getJSON(`/api/${kind}`);
+    view[kind] = await getJSON(`/api/${kind}${scoped ? `?name=${encodeURIComponent(view.name)}` : ""}`);
   } catch (error) {
     console.warn(kind, error);
   } finally {
@@ -96,10 +117,19 @@ function render() {
 
 function renderHeader() {
   const { state, live } = view;
-  if (state && state.exists) {
+  if (state && state.exists && state.kind === "signals") {
+    const p = state.params;
+    const info = TASK_INFO[p.task];
+    $("tag").textContent = `按固定规则交易「${info ? info.name : p.task}」的看多建议：每笔净值的 `
+      + `${(p.position_size * 100).toFixed(0)}%，最多 ${p.max_positions} 只，`
+      + `${p.use_levels ? "按报告给的限价、止损、目标价成交" : "开盘买入、到期卖出"}，`
+      + `后来的卖出/回避/风险信号在开盘卖出；起始 ${whole(state.capital)} 美元，每边 ${p.cost_bps} bp`;
+    $("booked").textContent = state.last_processed
+      ? `账本记到 ${state.last_processed}` : "账本尚未记账";
+  } else if (state && state.exists) {
     const parts = Object.entries(state.allocation)
       .map(([s, w]) => `${s} ${(w * 100).toFixed(0)}%`).join(" · ");
-    $("tag").textContent = `${state.name}：${parts}，起始 ${whole(state.capital)} 美元`;
+    $("tag").textContent = `每周配置加波动率调节：${parts}，起始 ${whole(state.capital)} 美元`;
     $("booked").textContent = state.last_processed
       ? `账本记到 ${state.last_processed}` : "账本尚未记账";
   }
@@ -127,6 +157,8 @@ function renderHero() {
     note = `按 ${clock(live.quote_time)} 的报价估算，不写进账本。收盘后由账本正式记账`;
   } else if (state.booked_session) {
     note = `已记账，截至 ${state.booked_session} 收盘`;
+  } else if (state.kind === "signals") {
+    note = `尚未开始交易，全部是现金。只交易 ${clock(state.created)} 之后粘贴的报告`;
   } else {
     note = `尚未开始交易，全部是现金。第一次决策在 ${state.next_decision}（${weekday(state.next_decision)}）收盘`;
   }
@@ -153,6 +185,19 @@ function renderTiles() {
   const span = state.first_session ? `${state.first_session} 起` : "尚未开始";
   const cashShare = state.positions
     ? state.booked_cash / state.equity : 1;
+  if (state.kind === "signals") {
+    box.replaceChildren(
+      tile("累计收益", pct(state.total_return), span, signClass(state.total_return)),
+      tile("同期 SPY", pct(state.spy_return), "含分红", signClass(state.spy_return)),
+      tile("同期 SGOV", pct(state.sgov_return), "要跑赢的基准", signClass(state.sgov_return)),
+      tile("最大回撤", pct(state.max_drawdown ?? null), "从最高点的最大跌幅",
+        state.max_drawdown < 0 ? "down" : ""),
+      tile("持仓", `${state.positions_count}/${state.params.max_positions}`,
+        `现金占 ${(cashShare * 100).toFixed(1)}%`),
+      tile("记到", state.last_processed ? state.last_processed.slice(5) : "—", "每个交易日收盘后记账"),
+    );
+    return;
+  }
   box.replaceChildren(
     tile("累计收益", pct(state.total_return), span, signClass(state.total_return)),
     tile("同期 SPY", pct(state.spy_return), "含分红", signClass(state.spy_return)),
@@ -182,9 +227,10 @@ function renderChart() {
   $("show-chart").setAttribute("aria-pressed", String(view.mode === "chart"));
   $("show-table").setAttribute("aria-pressed", String(view.mode === "table"));
   if (!series || series.dates.length < 2) {
-    const message = state && state.exists
-      ? `还没有记账的交易日。第一个是建立模拟之后收盘的那一天，第一次决策在 ${state.next_decision}。`
-      : "没有数据";
+    const message = !(state && state.exists) ? "没有数据"
+      : state.kind === "signals"
+        ? "还没有记账的交易日。账本从建立之后收盘的那一天开始记账，有建议入场才会买入。"
+        : `还没有记账的交易日。第一个是建立模拟之后收盘的那一天，第一次决策在 ${state.next_decision}。`;
     box.replaceChildren(el("div", { class: "empty", text: message }));
     tableBox.replaceChildren(el("div", { class: "empty", text: message }));
     return;
@@ -351,7 +397,10 @@ function describe(event) {
         + `${event.rebalancing ? "，再平衡到目标权重" : ""}（数据截至 ${event.data_through.slice(5)}）`;
     case "fill":
       return `${event.side === "BUY" ? "买入" : "卖出"} ${event.symbol} ${whole(event.shares)} 股 @ `
-        + `${event.price.toFixed(2)}，成本 ${event.cost.toFixed(2)}`;
+        + `${event.price.toFixed(2)}，成本 ${event.cost.toFixed(2)}`
+        + (event.reason ? `（${event.reason}${event.return == null ? "" : `，${pct(event.return)}`}）` : "");
+    case "skip":
+      return `跳过 ${event.symbol}：${event.reason}`;
     case "dividend":
       return `${event.symbol} 分红 ${money(event.amount)}（${whole(event.shares)} 股 × ${event.per_share}）`;
     case "split":
@@ -432,8 +481,39 @@ function summaryLines(task, data) {
     lines.push(`分数与第 ${k} 日超额的秩相关：平均 ${ic.mean.toFixed(3)}（${ic.reports} 份报告`
       + `${ic.t == null ? "" : `，t = ${ic.t.toFixed(2)}`}）。`);
   }
+  for (const k of TASK_INFO[task].checkpoints) {
+    const gap = s.selected_vs_rest && s.selected_vs_rest[k];
+    if (!gap || !gap.n) continue;
+    lines.push(`第 ${k} 日，被选中的减去同一份报告里落选的：平均 ${pct(gap.mean)}（${gap.n} 份报告`
+      + `${gap.t == null ? "" : `，t = ${gap.t.toFixed(2)}`}）。`);
+  }
+  const plan = s.plan;
+  if (plan && plan.long) {
+    lines.push(`按计划：看多 ${plan.long} 条，成交 ${plan.filled} 条，未成交 ${plan.unfilled} 条；`
+      + `已平仓 ${plan.closed.n} 条${plan.closed.n ? `，平均超额 ${pct(plan.closed.mean)}` : ""}；`
+      + `连同持有中的共 ${plan.all.n} 条${plan.all.n ? `，平均超额 ${pct(plan.all.mean)}` : ""}。`);
+  }
+  let controlled = false;
+  for (const k of TASK_INFO[task].checkpoints) {
+    const c = data.control && data.control[k];
+    if (!c || !c.n) continue;
+    controlled = true;
+    lines.push(`第 ${k} 日随机对照：报告平均方向超额 ${pct(c.observed)}；同一天从约 ${c.pool} 只股票里`
+      + `随机抽同样数量，中位数 ${pct(c.median)}，95% 范围 ${pct(c.low)} 到 ${pct(c.high)}，`
+      + `p = ${c.p.toFixed(3)}（越小越不像运气）。`);
+  }
+  const computed = view.signals && view.signals.control && view.signals.control.computed;
+  if (controlled && computed) lines.push(`随机对照每天收盘后计算一次，上次 ${clock(computed)}。`);
   if (!enough) lines.push("样本太少，还不能下结论。");
   return lines.join("\n");
+}
+
+function planText(row) {
+  const p = row.plan;
+  if (!p) return "—";
+  if (!p.fill_session) return p.status;
+  if (p.exit_session) return `${p.status} ${p.exit_session.slice(5)}`;
+  return `持有中（${p.filled_at}成交）`;
 }
 
 function renderSignals() {
@@ -446,8 +526,10 @@ function renderSignals() {
     parts.summary.textContent = summaryLines(task, mine);
     if (!mine.rows.length) { parts.table.replaceChildren(); continue; }
     const radar = task === "radar";
+    const planned = task !== "short";
     const titles = ["收到", "代码", "方向", "评分", ...(radar ? ["重要性", "事件"] : []), "入场",
-      ...info.checkpoints.map((k) => `第 ${k} 日超额`), "至今/到期超额", "判断", "状态", "价格偏离"];
+      ...info.checkpoints.map((k) => `${k}日超额`), "至今超额", "判断",
+      ...(planned ? ["按计划", "计划超额"] : []), "价格偏离"];
     const numeric = new Set(titles.filter((t) => t.includes("超额") || t === "价格偏离"));
     const head = el("tr", {}, ...titles.map((t) => el("th", { class: numeric.has(t) ? "num" : "", text: t })));
     const body = mine.rows.map((r) => {
@@ -461,7 +543,9 @@ function renderSignals() {
         el("td", { text: r.score == null ? "—" : String(r.score) }),
         ...(radar ? [el("td", { text: r.materiality == null ? "—" : `${r.materiality}/5` }),
           el("td", { text: (r.event && r.event.type) || "—" })] : []),
-        el("td", { text: r.entry_session ? `${r.entry_session.slice(5)} @ ${r.entry_price.toFixed(2)}` : "—" }),
+        el("td", { text: r.entry_session
+          ? `${r.entry_session.slice(5)} @ ${r.entry_price.toFixed(2)}${r.status === "已到期" ? "（已到期）" : ""}`
+          : r.status }),
         ...info.checkpoints.map((k) => {
           const mark = r.checkpoints[k];
           return el("td", { class: `num ${signClass(mark && mark.excess)}`, text: mark ? pct(mark.excess) : "—" });
@@ -469,10 +553,12 @@ function renderSignals() {
         el("td", { class: `num ${signClass(r.excess)}`, text: pct(r.excess) }),
         el("td", { class: r.signed_excess == null ? "" : r.signed_excess > 0 ? "verdict-yes" : "verdict-no",
           text: verdict }),
-        el("td", { text: r.status }),
+        ...(planned ? [el("td", { text: planText(r) }),
+          el("td", { class: `num ${signClass(r.plan && r.plan.excess)}`,
+            text: r.plan && r.plan.excess != null ? pct(r.plan.excess) : "—" })] : []),
         el("td", { class: `num ${flagged ? "flag down" : ""}`, text: gap == null ? "—" : pct(gap, 1) }));
     });
-    parts.table.replaceChildren(el("table", {}, el("thead", {}, head), el("tbody", {}, ...body)));
+    parts.table.replaceChildren(el("table", { class: "dense" }, el("thead", {}, head), el("tbody", {}, ...body)));
   }
 }
 
@@ -504,6 +590,14 @@ async function importReport(task) {
 
 $("show-chart").addEventListener("click", () => { view.mode = "chart"; renderChart(); });
 $("show-table").addEventListener("click", () => { view.mode = "table"; renderChart(); });
+$("ledger").addEventListener("change", (event) => {
+  view.name = event.target.value;
+  try { localStorage.setItem("ledger", view.name); } catch (error) { /* private window */ }
+  view.state = null;
+  view.live = null;
+  refreshState();
+  refreshLive();
+});
 buildTaskPanels();
 let resizeTimer;
 window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderChart, 150); });
@@ -511,8 +605,10 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) { refreshState(); refreshLive(); refreshSignals(); }
 });
 
-refreshState();
-refreshLive();
+loadLedgers().catch((error) => console.warn("ledgers", error)).finally(() => {
+  refreshState();
+  refreshLive();
+});
 refreshSignals();
 setInterval(refreshLive, 60 * 1000);
 setInterval(refreshState, 5 * 60 * 1000);

@@ -13,9 +13,15 @@
 # the closing auction settles, and the script ignores a bar until half an
 # hour after the close anyway.
 #
-# State and ledger live in logs/sim/thirds/. logs/ is gitignored, so back the
-# folder up: deleting it ends the record, and starting again starts a new one
-# from the day it is recreated, never from an earlier date.
+# After it, signal_ledger.py books the three rule-driven ledgers that trade
+# the pasted ChatGPT reports (logs/sim/chatgpt-daily, -radar, -short), and
+# signals_control.py scores those reports against random picks. Each step
+# runs whatever the one before it did; a failure is logged with its exit
+# code and does not stop the rest.
+#
+# State and ledgers live in logs/sim/ and logs/signals/. logs/ is gitignored,
+# so back them up: deleting a ledger ends its record, and starting again
+# starts a new one from the day it is recreated, never from an earlier date.
 #
 # To install (the machine's clock is on America/New_York):
 #   (crontab -l 2>/dev/null; \
@@ -33,5 +39,11 @@ mkdir -p "$LOG_DIR"
 {
     echo "===== $(date '+%Y-%m-%d %H:%M:%S %Z') ====="
     "$PYTHON" portfolio_sim.py --allocation thirds
+    echo "退出码 $?"
+    for task in daily radar short; do
+        "$PYTHON" signal_ledger.py --task "$task"
+        echo "退出码 $?"
+    done
+    "$PYTHON" signals_control.py
     echo "退出码 $?"
 } >> "$LOG_DIR/daily_$(date +%Y-%m).log" 2>&1

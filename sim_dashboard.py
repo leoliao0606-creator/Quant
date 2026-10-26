@@ -5,11 +5,15 @@
 
 Three things on one page, each refreshed on its own clock:
 
-- the ledger portfolio_sim.py writes, re-read every five minutes, so a
-  close booked by run_sim_daily.sh shows up without a reload;
-- an estimate of the book at Yahoo's latest prices, every minute. It is
+- a ledger, re-read every five minutes, so a close booked by
+  run_sim_daily.sh shows up without a reload. Every folder under
+  logs/sim with a state.json is offered: the weekly allocation that
+  portfolio_sim.py keeps, and the rule-driven ledgers signal_ledger.py
+  keeps for each ChatGPT task;
+- an estimate of that book at Yahoo's latest prices, every minute. It is
   never written anywhere: the ledger books at the close and only there;
-- the ChatGPT reports pasted into the page, scored against SPY.
+- the ChatGPT reports pasted into the page, scored against SPY, with the
+  random control signals_control.py writes after the close.
 
 Standard library only, because nothing else is installed in ibkr_trade and
 a page needs nothing more. It listens on 127.0.0.1 so nothing off this
@@ -86,7 +90,9 @@ def build_state_payload(state, ledger, bars, today):
         return {"exists": False}
     capital = float(state["params"]["capital"])
     marks = [e for e in ledger if e.get("type") == "mark"]
-    payload = {"exists": True, "name": state["name"], "allocation": state["allocation"],
+    payload = {"exists": True, "name": state["name"], "kind": state.get("kind", "allocation"),
+               "allocation": state.get("allocation", {}),
+               "positions_count": len(state.get("positions") or {}),
                "params": state["params"], "created": state["created"],
                "first_session": state.get("first_session"),
                "last_processed": state.get("last_processed"),
@@ -156,78 +162,86 @@ class Dashboard:
     """Paths, caches and the one lock that guards them."""
 
     def __init__(self, args):
-        self.state_dir = Path(args.state_dir) / args.name
+        self.state_root = Path(args.state_dir)
+        self.default_name = args.name
         self.cache_dir = Path(args.cache_dir)
         self.signals_dir = Path(args.signals_dir)
         self.signal_cache = self.cache_dir / "signals"
         self.lock = threading.Lock()
-        self.quotes, self.quotes_at = {}, 0.0
+        self.quotes = {}
         self.signal_rows, self.signals_key = None, None
 
     def now(self):
         return datetime.now(EASTERN)
 
-    def load_state(self):
+    def ledgers(self):
+        """Every ledger folder there is, the allocation first."""
+        found = []
+        for folder in sorted(self.state_root.glob("*/state.json")):
+            try:
+                state = json.loads(folder.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            found.append({"name": folder.parent.name,
+                          "kind": state.get("kind", "allocation"),
+                          "task": state.get("params", {}).get("task"),
+                          "created": state.get("created"),
+                          "last_processed": state.get("last_processed")})
+        found.sort(key=lambda row: (row["kind"] != "allocation", row["name"]))
+        return {"default": self.default_name, "ledgers": found}
+
+    def load_state(self, name):
+        # Only a name that is an existing folder: the name comes from the
+        # query string and must not reach the filesystem as a path.
+        names = {row["name"] for row in self.ledgers()["ledgers"]}
+        if (name or self.default_name) not in names:
+            return None
+        path = self.state_root / (name or self.default_name) / "state.json"
         try:
-            return json.loads((self.state_dir / "state.json").read_text(encoding="utf-8"))
+            return json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
 
-    def state(self):
+    def state(self, name=None):
         from ibkr_ml.yahoo import load_chart, parse_chart
 
-        state = self.load_state()
+        state = self.load_state(name)
         bars = {}
         if state is not None:
-            for symbol in [*state["allocation"], CASH_PROXY]:
-                payload = load_chart(symbol, self.cache_dir)
+            for symbol in ("SPY", CASH_PROXY):
+                payload = (load_chart(symbol, self.cache_dir)
+                           or load_chart(symbol, self.signal_cache))
                 if payload is not None:
                     bars[symbol] = parse_chart(payload)
-        ledger = read_ledger(self.state_dir / "ledger.jsonl")
+        ledger = read_ledger(self.state_root / (name or self.default_name) / "ledger.jsonl") \
+            if state is not None else []
         return build_state_payload(state, ledger, bars, self.now().date())
 
-    def live(self):
+    def live(self, name=None):
+        """Quotes for what the ledger holds, each fetched at most once a minute."""
         from ibkr_ml.yahoo import fetch_quote
 
-        state = self.load_state()
+        state = self.load_state(name)
         if state is None:
             return {"exists": False}
+        quotes = {}
         with self.lock:
-            if time.monotonic() - self.quotes_at > QUOTE_SECONDS:
-                fresh = {}
-                for symbol in state["shares"]:
+            for symbol in state["shares"]:
+                fetched_at, quote = self.quotes.get(symbol, (0.0, None))
+                if quote is None or time.monotonic() - fetched_at > QUOTE_SECONDS:
                     try:
-                        fresh[symbol] = fetch_quote(symbol)
+                        quote = fetch_quote(symbol)
                     except Exception as exc:
-                        fresh[symbol] = {"error": str(exc)[:120]}
-                self.quotes, self.quotes_at = fresh, time.monotonic()
-            quotes = dict(self.quotes)
+                        quote = {"error": str(exc)[:120]}
+                    self.quotes[symbol] = (time.monotonic(), quote)
+                quotes[symbol] = quote
         return build_live_payload(state, quotes, self.now())
 
     def bars_for(self, ticker, start):
-        """Bars for one signal ticker, fetched at most every half hour.
+        """Bars for one signal ticker, fetched at most every half hour."""
+        from ibkr_ml.yahoo import cached_bars
 
-        A cached file that is fresh but begins after `start` is fetched
-        again anyway. Pasting an older report after newer ones moves `start`
-        back, and the cache from the newer ones would otherwise put that
-        report's entry on the cache's first session instead of its own.
-        """
-        import pandas as pd
-
-        from ibkr_ml.yahoo import chart_path, fetch_chart, load_chart, parse_chart
-
-        path = chart_path(self.signal_cache, ticker)
-        cached = load_chart(ticker, self.signal_cache)
-        frame = parse_chart(cached) if cached is not None else None
-        covers = (frame is not None and not frame.empty
-                  and frame.index[0] <= pd.Timestamp(start.date()))
-        fresh = path.exists() and time.time() - path.stat().st_mtime <= SIGNAL_BARS_SECONDS
-        if covers and fresh:
-            return frame
-        try:
-            return parse_chart(fetch_chart(ticker, self.signal_cache, start=start))
-        except Exception:
-            return frame
+        return cached_bars(ticker, self.signal_cache, start, SIGNAL_BARS_SECONDS)
 
     def signals(self):
         """Scored rows and their summary, kept apart per task."""
@@ -253,12 +267,18 @@ class Dashboard:
             return cache[ticker]
 
         rows = score_inbox(records, bars_for) if records else []
-        payload = {"tasks": {}}
+        try:
+            control = json.loads((self.signals_dir / "control.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            control = {}
+        payload = {"tasks": {}, "control": {k: control.get(k)
+                                            for k in ("computed", "universe", "draws")}}
         for task in TASKS:
             mine = [r for r in rows if r["task"] == task]
             payload["tasks"][task] = {
                 "reports": sum(1 for r in records if r["task"] == task),
-                "rows": mine, "summary": summarize(mine)}
+                "rows": mine, "summary": summarize(mine),
+                "control": (control.get("tasks") or {}).get(task, {})}
         with self.lock:
             self.signal_rows, self.signals_key = payload, key
         return payload
@@ -296,8 +316,14 @@ def make_handler(dashboard, allowed_hosts):
         def do_GET(self):
             if not self.host_ok():
                 return self.send_json({"error": "host not allowed"}, 403)
-            path = self.path.split("?", 1)[0]
-            routes = {"/api/state": dashboard.state, "/api/live": dashboard.live,
+            from urllib.parse import parse_qs, urlsplit
+
+            parts = urlsplit(self.path)
+            path = parts.path
+            name = (parse_qs(parts.query).get("name") or [None])[0]
+            routes = {"/api/state": lambda: dashboard.state(name),
+                      "/api/live": lambda: dashboard.live(name),
+                      "/api/ledgers": dashboard.ledgers,
                       "/api/signals": dashboard.signals}
             if path in routes:
                 try:
