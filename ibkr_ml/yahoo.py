@@ -76,6 +76,33 @@ def load_chart(symbol, cache_dir):
         return None
 
 
+def cached_bars(symbol, cache_dir, start, max_age_seconds):
+    """Parsed bars for one symbol, downloading only when the copy is unfit.
+
+    A copy is unfit when it is older than `max_age_seconds` or begins after
+    `start`. The second case is easy to miss: a fresh copy fetched for a
+    later start does not reach back to an earlier one, and anything that
+    looked up its entry session in it would land on the copy's first row.
+    A failed download falls back to whatever copy exists.
+    """
+    import time
+
+    import pandas as pd
+
+    path = chart_path(cache_dir, symbol)
+    cached = load_chart(symbol, cache_dir)
+    frame = parse_chart(cached) if cached is not None else None
+    covers = (frame is not None and not frame.empty
+              and frame.index[0] <= pd.Timestamp(start.date()))
+    fresh = path.exists() and time.time() - path.stat().st_mtime <= max_age_seconds
+    if covers and fresh:
+        return frame
+    try:
+        return parse_chart(fetch_chart(symbol, cache_dir, start=start))
+    except Exception:
+        return frame
+
+
 def _get(url, timeout):
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(request, timeout=timeout) as response:

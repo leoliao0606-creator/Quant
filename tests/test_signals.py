@@ -223,6 +223,7 @@ class TestScore:
 
 def matured(key, score, excess, direction=1):
     return {"key": key, "score": score, "direction": direction,
+            "action": "buy" if direction else "watch",
             "entry_session": "2026-10-26",
             "checkpoints": {"5": {"excess": excess, "signed": direction * excess}}}
 
@@ -247,3 +248,121 @@ class TestSummary:
         summary = summarize(rows)
         assert summary["directional"] == 1
         assert summary["checkpoints"]["5"] == {"n": 1, "hits": 1, "mean": 0.02, "t": None}
+
+
+from ibkr_ml.signals import (random_control, selected_against_rest,  # noqa: E402
+                             simulate_plan)
+
+MONDAY_EARLY = datetime(2026, 10, 26, 8, 0, tzinfo=EASTERN)
+
+
+def ohlc(rows, start="2026-10-26", splits=None):
+    days = pd.bdate_range(start, periods=len(rows))
+    o, h, l, c = (list(column) for column in zip(*rows))
+    frame = pd.DataFrame({"open": o, "high": h, "low": l, "close": c, "adjclose": c,
+                          "dividend": 0.0, "split": 1.0}, index=days)
+    for position, ratio in (splits or {}).items():
+        frame.iloc[position, frame.columns.get_loc("split")] = ratio
+    return frame
+
+
+def spy(n):
+    return ohlc([(500.0, 500.0, 500.0, 500.0)] * n)
+
+
+def plan(rows, **levels):
+    item = {"ticker": "X", "action": "buy", "horizon_days": None, "entry_limit": None,
+            "stop": None, "target": None, **levels}
+    return simulate_plan(item, MONDAY_EARLY, ohlc(rows), spy(len(rows)))
+
+
+class TestPlan:
+    def test_no_limit_fills_at_the_open_and_a_target_exits_at_the_target(self):
+        result = plan([(100, 101, 99, 100), (100, 103, 99, 102), (102, 111, 101, 110)],
+                      target=110.0)
+        assert result["fill_price"] == 100 and result["filled_at"] == "开盘"
+        assert result["status"] == "止盈" and result["exit_price"] == 110.0
+        assert result["return"] == pytest.approx(0.10)
+
+    def test_a_limit_touched_by_the_low_fills_at_the_limit(self):
+        result = plan([(100, 101, 96, 98), (97, 98, 94, 95)], entry_limit=95.0)
+        assert result["fill_session"] == "2026-10-27"
+        assert result["fill_price"] == 95.0 and result["filled_at"] == "限价"
+
+    def test_an_open_already_under_the_limit_fills_at_the_open(self):
+        result = plan([(94, 96, 93, 95)], entry_limit=95.0)
+        assert result["fill_price"] == 94 and result["filled_at"] == "开盘"
+
+    def test_a_limit_never_reached_expires_after_five_sessions(self):
+        rows = [(100, 101, 99, 100)] * 5
+        assert plan(rows, entry_limit=80.0)["status"] == "未成交"
+        assert plan(rows[:3], entry_limit=80.0)["status"] == "等待成交"
+
+    def test_a_bar_through_both_stop_and_target_counts_as_the_stop(self):
+        result = plan([(100, 101, 99, 100), (100, 120, 80, 100)], stop=90.0, target=110.0)
+        assert result["status"] == "止损" and result["exit_price"] == 90.0
+
+    def test_an_open_through_the_stop_exits_at_the_open_not_the_stop(self):
+        result = plan([(100, 101, 99, 100), (85, 86, 84, 85)], stop=90.0)
+        assert result["status"] == "止损" and result["exit_price"] == 85
+
+    def test_a_limit_fill_with_the_stop_inside_the_same_bar_is_stopped(self):
+        # The bar cannot say whether its low came before or after the fill.
+        result = plan([(100, 115, 85, 100)], entry_limit=95.0, stop=90.0, target=110.0)
+        assert result["filled_at"] == "限价"
+        assert result["status"] == "止损" and result["exit_session"] == "2026-10-26"
+
+    def test_the_horizon_exits_at_the_close_of_the_first_session_on_or_after_it(self):
+        rows = [(100, 101, 99, 100), (100, 101, 99, 101), (101, 103, 100, 102), (102, 104, 101, 103)]
+        result = plan(rows, horizon_days=2)
+        assert result["status"] == "到期"
+        assert result["exit_session"] == "2026-10-28" and result["exit_price"] == 102
+
+    def test_a_stop_above_the_fill_is_ignored_with_a_note(self):
+        result = plan([(100, 101, 99, 100)], stop=105.0)
+        assert result["status"] == "持有中" and result["notes"]
+
+    def test_levels_follow_a_split_while_held(self):
+        rows = [(100, 101, 99, 100), (100, 101, 99, 100), (50, 51, 49, 50)]
+        frame = ohlc(rows, splits={2: 2.0})
+        item = {"ticker": "X", "action": "buy", "horizon_days": None, "entry_limit": None,
+                "stop": 90.0, "target": None}
+        result = simulate_plan(item, MONDAY_EARLY, frame, spy(3))
+        assert result["status"] == "持有中"
+
+    def test_a_short_side_call_has_no_plan(self):
+        item = {"ticker": "X", "action": "risk"}
+        assert simulate_plan(item, MONDAY_EARLY, ohlc([(1, 1, 1, 1)]), spy(1))["status"] == "不适用"
+
+
+class TestControls:
+    def test_chosen_names_are_measured_against_the_names_passed_over(self):
+        rows = [{"key": "a", "action": "buy", "direction": 1,
+                 "checkpoints": {"5": {"excess": 0.03, "signed": 0.03}}},
+                {"key": "a", "action": "watch", "direction": 0,
+                 "checkpoints": {"5": {"excess": -0.01, "signed": None}}},
+                {"key": "b", "action": "buy", "direction": 1,
+                 "checkpoints": {"5": {"excess": 0.02, "signed": 0.02}}}]
+        result = selected_against_rest(rows, 5)
+        assert result["n"] == 1 and result["mean"] == pytest.approx(0.04)
+
+    def universe(self, gains):
+        frames = {}
+        for i, gain in enumerate(gains):
+            frames[f"S{i}"] = ohlc([(100, 100, 100, 100)] * 4 + [(100, 100, 100, 100 * (1 + gain))])
+        return frames
+
+    def test_a_call_better_than_every_random_name_gets_the_smallest_p(self):
+        universe = self.universe([g / 100 for g in range(-5, 5)])
+        rows = [{"key": "a", "direction": 1, "entry_session": "2026-10-26",
+                 "checkpoints": {"5": {"excess": 0.10, "signed": 0.10}}}]
+        result = random_control(rows, universe, spy(5), 5, draws=999)
+        assert result["n"] == 1 and result["pool"] == 10
+        assert result["p"] == pytest.approx(1 / 1000)
+
+    def test_a_name_not_trading_on_the_entry_day_is_never_drawn(self):
+        universe = self.universe([0.0, 0.0])
+        universe["LATE"] = ohlc([(100, 100, 100, 100)] * 4, start="2026-10-27")
+        rows = [{"key": "a", "direction": 1, "entry_session": "2026-10-26",
+                 "checkpoints": {"5": {"excess": 0.0, "signed": 0.0}}}]
+        assert random_control(rows, universe, spy(5), 5, draws=99)["pool"] == 2

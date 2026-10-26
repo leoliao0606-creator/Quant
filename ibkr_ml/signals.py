@@ -34,8 +34,17 @@ honest:
   correlation per report (an information coefficient), averaged over
   reports. It needs every candidate scored, not only the recommended ones.
 
-Limit prices, stops and targets are stored but not simulated yet; the
-score here is "bought at the open, held".
+Two scores are kept for a long call. "Bought at the open, held" says
+whether the view was right. "As planned" (`simulate_plan`) says whether the
+trade the report laid out - its limit, stop, target and horizon - would
+have made money, filled and exited on daily bars by rules fixed before any
+report arrived. A view can be right and its plan still lose: a limit that
+never fills, a stop inside the noise.
+
+Neither says whether the result is better than luck. Two controls do:
+within a report, the names it chose against the ones it scored and passed
+over; and against the same number of names drawn at random, on the same
+entry dates, from a fixed universe (`random_control`).
 """
 
 from __future__ import annotations
@@ -65,6 +74,12 @@ THESIS_CHANGES = ("new", "strengthen", "weaken", "invalidate")
 CHECKPOINTS = (1, 5, 20, 60)
 IC_CHECKPOINTS = (5, 20)
 IC_MIN_ITEMS = 5
+LONG_ACTIONS = ("buy", "opportunity")
+EXIT_ACTIONS = ("sell", "avoid", "risk")
+# A limit order not filled within this many sessions is treated as cancelled.
+LIMIT_VALID_SESSIONS = 5
+# Holding period for a plan that names none.
+DEFAULT_HOLD_SESSIONS = 20
 TICKER = re.compile(r"^[A-Z][A-Z0-9-]{0,9}$")
 DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.S)
@@ -267,6 +282,119 @@ def _adjusted_open(bars, day):
     return opened * float(bars.at[day, "adjclose"]) / float(bars.at[day, "close"])
 
 
+def _factor(bars, day):
+    """Adjusted over printed close: turns a printed price into adjclose units."""
+    return float(bars.at[day, "adjclose"]) / float(bars.at[day, "close"])
+
+
+def simulate_plan(item, received, bars, benchmark, use_levels=True,
+                  default_sessions=DEFAULT_HOLD_SESSIONS):
+    """The long trade a report laid out, filled and exited on daily bars.
+
+    Fixed before any report arrived, and conservative wherever a daily bar
+    cannot say which came first:
+
+    - Entry. With no limit, the entry session's open. With a limit, the
+      first of the next LIMIT_VALID_SESSIONS sessions that reaches it: at
+      the open if the open is already at or below it, else at the limit if
+      the low touches it. None of them: not filled.
+    - Exit, from the next session on. An open through the stop or the
+      target exits at that open; otherwise a low through the stop exits at
+      the stop and a high through the target at the target; both on one bar
+      counts as the stop. On the fill session itself, a fill at the open is
+      checked the same way, and a fill at the limit only against the stop -
+      the bar cannot say whether its low came before or after the fill, so
+      the losing order is assumed.
+    - Horizon. `horizon_days` calendar days after the fill, exiting at the
+      close of the first session on or after it; without one,
+      `default_sessions` sessions.
+    - A stop at or above the fill, or a target at or below it, cannot have
+      been meant and is ignored with a note.
+
+    Returns the fill, the exit if there was one, and the return against SPY
+    over the same span, both in adjusted terms so dividends count.
+    """
+    if item["action"] not in LONG_ACTIONS:
+        return {"status": "不适用"}
+    if bars is None or bars.empty or benchmark is None or benchmark.empty:
+        return {"status": "没有价格数据"}
+    entry = entry_session(bars.index, received)
+    if entry is None or entry not in benchmark.index:
+        return {"status": "等待开盘"}
+    sessions = bars.index[bars.index >= entry].intersection(benchmark.index)
+    limit = item.get("entry_limit") if use_levels else None
+    stop = item.get("stop") if use_levels else None
+    target = item.get("target") if use_levels else None
+
+    fill_day = fill_price = None
+    at_open = True
+    for day in sessions[:LIMIT_VALID_SESSIONS]:
+        opened, low = float(bars.at[day, "open"]), float(bars.at[day, "low"])
+        if math.isnan(opened):
+            return {"status": "缺开盘价"}
+        if limit is None or opened <= limit:
+            fill_day, fill_price = day, opened
+            break
+        if not math.isnan(low) and low <= limit:
+            fill_day, fill_price, at_open = day, float(limit), False
+            break
+    if fill_day is None:
+        if len(sessions) >= LIMIT_VALID_SESSIONS:
+            return {"status": "未成交", "limit": limit,
+                    "expired_session": str(sessions[LIMIT_VALID_SESSIONS - 1].date())}
+        return {"status": "等待成交", "limit": limit}
+
+    notes = []
+    if stop is not None and stop >= fill_price:
+        stop = None
+        notes.append("止损价不低于成交价，已忽略")
+    if target is not None and target <= fill_price:
+        target = None
+        notes.append("目标价不高于成交价，已忽略")
+    horizon = item.get("horizon_days")
+    due = fill_day + timedelta(days=horizon) if horizon else None
+
+    held = sessions[sessions >= fill_day]
+    exit_day = exit_price = reason = None
+    for position, day in enumerate(held):
+        ratio = float(bars.at[day, "split"]) if "split" in bars else 1.0
+        if position > 0 and ratio != 1.0:
+            # Levels were written in pre-split prices; the bars from here on
+            # are post-split, so the levels move with them.
+            stop = stop / ratio if stop is not None else None
+            target = target / ratio if target is not None else None
+        opened = float(bars.at[day, "open"])
+        high, low = float(bars.at[day, "high"]), float(bars.at[day, "low"])
+        through_stop = stop is not None and low <= stop
+        through_target = target is not None and high >= target
+        if position == 0 and not at_open:
+            through_target = False
+        if position > 0 and stop is not None and opened <= stop:
+            exit_day, exit_price, reason = day, opened, "止损"
+        elif position > 0 and target is not None and opened >= target:
+            exit_day, exit_price, reason = day, opened, "止盈"
+        elif through_stop:
+            exit_day, exit_price, reason = day, float(stop), "止损"
+        elif through_target:
+            exit_day, exit_price, reason = day, float(target), "止盈"
+        elif (due is not None and day >= due) or (due is None and default_sessions
+                                                  and position + 1 >= default_sessions):
+            exit_day, exit_price, reason = day, float(bars.at[day, "close"]), "到期"
+        if exit_day is not None:
+            break
+
+    end = exit_day if exit_day is not None else held[-1]
+    end_price = exit_price if exit_price is not None else float(bars.at[end, "close"])
+    own = end_price * _factor(bars, end) / (fill_price * _factor(bars, fill_day)) - 1.0
+    market = (float(benchmark.at[end, "adjclose"])
+              / _adjusted_open(benchmark, fill_day) - 1.0)
+    return {"status": reason or "持有中", "fill_session": str(fill_day.date()),
+            "fill_price": fill_price, "filled_at": "开盘" if at_open else "限价",
+            "exit_session": str(exit_day.date()) if exit_day is not None else None,
+            "exit_price": exit_price, "through": str(end.date()),
+            "return": own, "spy_return": market, "excess": own - market, "notes": notes}
+
+
 def score_item(item, received, bars, benchmark):
     """Excess over SPY from the entry open, at each checkpoint and so far."""
     direction = ACTIONS[item["action"]]
@@ -283,6 +411,8 @@ def score_item(item, received, bars, benchmark):
     if benchmark is None or benchmark.empty:
         row["status"] = "没有 SPY 数据"
         return row
+    if item["action"] in LONG_ACTIONS:
+        row["plan"] = simulate_plan(item, received, bars, benchmark)
     entry = entry_session(bars.index, received)
     if entry is None or entry not in benchmark.index:
         return row
@@ -380,16 +510,109 @@ def information_coefficient(rows, checkpoint):
     return {"reports": stats["n"], "mean": stats.get("mean"), "t": stats.get("t")}
 
 
+def selected_against_rest(rows, checkpoint):
+    """Within each report, chosen long calls minus the names passed over.
+
+    The passed-over names are the report's "watch" items: scored by the
+    same reader on the same morning and not chosen, which makes them the
+    control nearest to the choice itself. Reports without both kinds do
+    not count.
+    """
+    groups = {}
+    for row in rows:
+        mark = row["checkpoints"].get(str(checkpoint))
+        if not mark:
+            continue
+        side = ("chosen" if row["action"] in LONG_ACTIONS
+                else "rest" if row["action"] == "watch" else None)
+        if side:
+            groups.setdefault(row["key"], {"chosen": [], "rest": []})[side].append(mark["excess"])
+    gaps = [sum(g["chosen"]) / len(g["chosen"]) - sum(g["rest"]) / len(g["rest"])
+            for g in groups.values() if g["chosen"] and g["rest"]]
+    return _stats(gaps)
+
+
 def summarize(rows):
-    """Per-checkpoint hit statistics for the directional items, and the IC."""
+    """Hit statistics per checkpoint, the IC, the plan, and the inner control."""
     directional = [r for r in rows if r["direction"]]
     summary = {"items": len(rows), "directional": len(directional),
                "entered": sum(1 for r in rows if r.get("entry_session")),
-               "checkpoints": {}, "ic": {}}
+               "checkpoints": {}, "ic": {}, "selected_vs_rest": {}}
     for count in CHECKPOINTS:
         values = [r["checkpoints"][str(count)]["signed"] for r in directional
                   if str(count) in r["checkpoints"]]
         summary["checkpoints"][str(count)] = _stats(values)
+        summary["selected_vs_rest"][str(count)] = selected_against_rest(rows, count)
     for count in IC_CHECKPOINTS:
         summary["ic"][str(count)] = information_coefficient(rows, count)
+
+    plans = [r["plan"] for r in rows if r.get("plan")]
+    filled = [p for p in plans if p.get("fill_session")]
+    summary["plan"] = {
+        "long": len(plans), "filled": len(filled),
+        "unfilled": sum(1 for p in plans if p["status"] == "未成交"),
+        "closed": _stats([p["excess"] for p in filled if p.get("exit_session")]),
+        "all": _stats([p["excess"] for p in filled])}
     return summary
+
+
+def universe_excess(bars_by_symbol, benchmark, entry, checkpoint):
+    """Excess over SPY, entry open to the checkpoint close, for every name.
+
+    Only names that printed an open on the entry session and a close on the
+    checkpoint session count - a name that was not trading that day cannot
+    be drawn, or the control is handed a zero it did not earn.
+    """
+    span = benchmark.index[benchmark.index >= entry]
+    if len(span) < checkpoint or entry not in benchmark.index:
+        return []
+    end = span[checkpoint - 1]
+    market = float(benchmark.at[end, "adjclose"]) / _adjusted_open(benchmark, entry) - 1.0
+    values = []
+    for frame in bars_by_symbol.values():
+        if frame is None or entry not in frame.index or end not in frame.index:
+            continue
+        if math.isnan(float(frame.at[entry, "open"])):
+            continue
+        values.append(float(frame.at[end, "adjclose"]) / _adjusted_open(frame, entry)
+                      - 1.0 - market)
+    return values
+
+
+def random_control(rows, bars_by_symbol, benchmark, checkpoint, draws=2000, seed=0):
+    """Where the reports' mean signed excess sits among random picks.
+
+    Each directional item is replaced by a name drawn from the universe on
+    its own entry date, signed the way the item was, and the mean taken;
+    `draws` times. p is the share of random means at or above the observed
+    one, counting the observed as one of them.
+    """
+    import numpy as np
+    import pandas as pd
+
+    items = [r for r in rows if r["direction"] and str(checkpoint) in r["checkpoints"]]
+    pools, observed, directions, kept = {}, [], [], []
+    for row in items:
+        entry = row["entry_session"]
+        if entry not in pools:
+            pools[entry] = np.array(universe_excess(bars_by_symbol, benchmark,
+                                                    pd.Timestamp(entry), checkpoint))
+        if len(pools[entry]):
+            kept.append(row)
+            observed.append(row["checkpoints"][str(checkpoint)]["signed"])
+            directions.append(row["direction"])
+    if not kept:
+        return {"n": 0}
+    rng = np.random.default_rng(seed)
+    sums = np.zeros(draws)
+    for row, direction in zip(kept, directions):
+        pool = pools[row["entry_session"]]
+        sums += direction * pool[rng.integers(len(pool), size=draws)]
+    means = sums / len(kept)
+    actual = float(np.mean(observed))
+    return {"n": len(kept), "observed": actual,
+            "median": float(np.median(means)),
+            "low": float(np.quantile(means, 0.025)),
+            "high": float(np.quantile(means, 0.975)),
+            "p": float((np.sum(means >= actual) + 1) / (draws + 1)),
+            "pool": int(np.mean([len(pools[r["entry_session"]]) for r in kept]))}
